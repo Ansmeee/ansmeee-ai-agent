@@ -8,7 +8,10 @@ import (
 	"time"
 
 	"ansmeee-ai-agent/internal/config"
+	"ansmeee-ai-agent/pkg/logger"
+
 	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
 )
 
 // RedisStore implements SessionStore backed by Redis.
@@ -77,7 +80,9 @@ func (r *RedisStore) History(ctx context.Context, sessionID string) ([]Message, 
 	}
 
 	// Refresh TTL.
-	r.client.Expire(ctx, r.key(sessionID), r.ttl)
+	if err := r.client.Expire(ctx, r.key(sessionID), r.ttl).Err(); err != nil {
+		logger.L().Warn("refresh session TTL failed", zap.String("session", sessionID), zap.Error(err))
+	}
 
 	messages := make([]Message, 0, len(vals))
 	for _, v := range vals {
@@ -119,12 +124,19 @@ func (r *RedisStore) ListSessions(ctx context.Context, userID int64, agentID str
 			}
 			id := key[len(r.prefix):]
 
-			storedUID, _ := r.client.Get(ctx, key+":user_id").Int64()
+			storedUID, err := r.client.Get(ctx, key+":user_id").Int64()
+			if err != nil {
+				logger.L().Warn("read session user_id failed", zap.String("key", key), zap.Error(err))
+				continue
+			}
 			if storedUID != userID {
 				continue
 			}
 
-			storedAgent, _ := r.client.Get(ctx, key+":agent").Result()
+			storedAgent, err := r.client.Get(ctx, key+":agent").Result()
+			if err != nil && err != redis.Nil {
+				logger.L().Warn("read session agent failed", zap.String("key", key), zap.Error(err))
+			}
 			if agentID != "" && storedAgent != agentID {
 				continue
 			}

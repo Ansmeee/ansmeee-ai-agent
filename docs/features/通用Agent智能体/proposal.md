@@ -421,7 +421,7 @@ UI 要求：
 | PUT /api/v1/agents/:id | 同上 |
 | GET /api/v1/agents/:id | Response 新增上述字段 |
 | GET /api/v1/agents | Response 列表项新增上述字段 |
-| POST /api/v1/chat/stream | SSE 新增 `tool_start`, `tool_end`, `thinking` 事件 |
+| POST /api/v1/chat/completion | SSE 新增 `tool_start`, `tool_end`, `thinking` 事件 |
 | GET /api/v1/chat/:sessionId | Response 消息包含 role=3(tool) 和 role=4(tool_call) |
 
 ### 6.2 新增接口

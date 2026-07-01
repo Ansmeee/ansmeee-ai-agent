@@ -17,6 +17,7 @@ import (
 	"ansmeee-ai-agent/internal/memory"
 	"ansmeee-ai-agent/internal/router"
 	"ansmeee-ai-agent/internal/tool"
+	"ansmeee-ai-agent/pkg/logger"
 	"go.uber.org/zap"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -34,13 +35,19 @@ func main() {
 	}
 
 	// Initialize logger.
-	logger, err := zap.NewProduction()
-	if cfg.Server.Mode == "debug" {
-		logger, err = zap.NewDevelopment()
+	if err := logger.Init(logger.Config{
+		Level:      cfg.Log.Level,
+		Format:     cfg.Log.Format,
+		Output:     cfg.Log.Output,
+		Filename:   cfg.Log.Filename,
+		MaxSize:    cfg.Log.MaxSize,
+		MaxBackups: cfg.Log.MaxBackups,
+		MaxAge:     cfg.Log.MaxAge,
+		Compress:   cfg.Log.Compress,
+	}); err != nil {
+		log.Fatalf("failed to init logger: %v", err)
 	}
-	if err != nil {
-		log.Fatalf("failed to create logger: %v", err)
-	}
+	appLogger := logger.L()
 	defer logger.Sync()
 
 	logger.Info("starting server",
@@ -49,7 +56,7 @@ func main() {
 	)
 
 	// Initialize GORM DB with master/slave.
-	gormDB, err := openGORM(cfg)
+	gormDB, err := openGORM(context.Background(), cfg)
 	if err != nil {
 		logger.Fatal("failed to open database", zap.Error(err))
 	}
@@ -63,7 +70,7 @@ func main() {
 	logger.Info("agent store initialized")
 
 	// Initialize session store (MySQL or fallback to memory/redis).
-	sessionStore, err := initSessionStore(cfg, gormDB, logger)
+	sessionStore, err := initSessionStore(context.Background(), cfg, gormDB)
 	if err != nil {
 		logger.Fatal("failed to init session store", zap.Error(err))
 	}
@@ -84,7 +91,7 @@ func main() {
 	logger.Info("tools registered", zap.Int("count", len(reg.List())))
 
 	// Initialize agent engine.
-	cb := agent.NewCallback(logger)
+	cb := agent.NewCallback(appLogger)
 	engine := agent.New(llmProvider, reg, sessionStore, cb,
 		agent.WithMaxIter(cfg.Agent.MaxIterations),
 		agent.WithToolTimeout(cfg.Agent.ToolTimeout),
@@ -99,7 +106,7 @@ func main() {
 	logger.Info("model config store initialized")
 
 	// Setup router and start server.
-	r := router.Setup(cfg, logger, sessionStore, engine, reg, agentStore, modelConfigStore, gormDB)
+	r := router.Setup(cfg, appLogger, sessionStore, engine, reg, agentStore, modelConfigStore, gormDB)
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	srv := &http.Server{
@@ -128,12 +135,15 @@ func main() {
 	logger.Info("server stopped")
 }
 
-func openGORM(cfg *config.Config) (*gorm.DB, error) {
+func openGORM(_ context.Context, cfg *config.Config) (*gorm.DB, error) {
 	db, err := gorm.Open(mysql.Open(cfg.MySQL.Master.DSN()), &gorm.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("open master: %w", err)
 	}
-	sqlDB, _ := db.DB()
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("get underlying sql.DB: %w", err)
+	}
 	sqlDB.SetMaxOpenConns(cfg.MySQL.Master.MaxOpenConns)
 	sqlDB.SetMaxIdleConns(cfg.MySQL.Master.MaxIdleConns)
 	sqlDB.SetConnMaxLifetime(cfg.MySQL.Master.ConnMaxLifetime)
@@ -151,7 +161,7 @@ func openGORM(cfg *config.Config) (*gorm.DB, error) {
 	return db, nil
 }
 
-func initSessionStore(cfg *config.Config, gormDB *gorm.DB, logger *zap.Logger) (memory.SessionStore, error) {
+func initSessionStore(_ context.Context, cfg *config.Config, gormDB *gorm.DB) (memory.SessionStore, error) {
 	switch cfg.Memory.Type {
 	case "mysql":
 		logger.Info("using MySQL session store")

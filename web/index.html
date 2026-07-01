@@ -108,47 +108,16 @@
   /* ——— messages ——— */
   .msg { display: flex; flex-direction: column; animation: fadeIn .2s ease; }
   @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } }
-  .msg.user { align-self: flex-end; }
-  .msg.assistant { align-self: flex-start; }
-  .msg.tool { align-self: flex-start; max-width: 60%; }
+  .msg.human { align-self: flex-end; }
+  .msg.ai { align-self: flex-start; }
   .msg .role { font-size: 11px; color: var(--text-secondary); margin-bottom: 3px; padding: 0 2px; }
   .msg .bubble {
     padding: 10px 16px; border-radius: 16px; line-height: 1.55; font-size: 14px;
     white-space: pre-wrap; word-break: break-word; box-shadow: var(--shadow);
   }
-  .msg.user .bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 6px; }
-  .msg.assistant .bubble { background: none; border: none; box-shadow: none; padding: 0; border-radius: 0; }
-  .msg.tool .bubble { background: #fefce8; border: 1px solid #fde68a; border-bottom-left-radius: 6px; font-size: 12px; color: var(--text-secondary); }
+  .msg.human .bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 6px; }
+  .msg.ai .bubble { background: none; border: none; box-shadow: none; padding: 0; border-radius: 0; }
 
-  /* ——— tool call blocks ——— */
-  .tool-block {
-    border: 1px solid var(--border); border-radius: 10px; margin: 8px 0;
-    background: #f8fafc; overflow: hidden; font-size: 13px;
-  }
-  .tool-block-header {
-    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
-    cursor: pointer; user-select: none; transition: background .1s;
-  }
-  .tool-block-header:hover { background: #f1f5f9; }
-  .tool-block-header .tool-icon { font-size: 14px; }
-  .tool-block-header .tool-name { font-weight: 600; color: var(--text); }
-  .tool-block-header .tool-status {
-    margin-left: auto; font-size: 11px; padding: 2px 8px;
-    border-radius: 10px; font-weight: 500;
-  }
-  .tool-block-header .tool-status.running { background: #dbeafe; color: #2563eb; }
-  .tool-block-header .tool-status.success { background: #dcfce7; color: #16a34a; }
-  .tool-block-header .tool-status.error { background: #fee2e2; color: #dc2626; }
-  .tool-block-header .toggle-arrow { font-size: 11px; color: var(--text-secondary); transition: transform .15s; }
-  .tool-block.expanded .toggle-arrow { transform: rotate(90deg); }
-  .tool-block-body { display: none; padding: 0 12px 10px; }
-  .tool-block.expanded .tool-block-body { display: block; }
-  .tool-block-body .tool-section { margin-top: 6px; }
-  .tool-block-body .tool-section-title { font-size: 11px; font-weight: 600; color: var(--text-secondary); margin-bottom: 3px; }
-  .tool-block-body pre {
-    background: #1e1e2e; color: #e2e8f0; border-radius: 6px; padding: 8px 10px;
-    overflow-x: auto; font-size: 12px; line-height: 1.4; white-space: pre-wrap; word-break: break-all;
-  }
   .thinking-indicator {
     display: flex; align-items: center; gap: 6px; padding: 4px 0;
     font-size: 12px; color: var(--text-secondary);
@@ -217,8 +186,8 @@
   .bubble.md th, .bubble.md td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
   .bubble.md th { background: #f8fafc; font-weight: 600; }
   .bubble.md hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
-  .msg.user .bubble.md code { background: rgba(255,255,255,.2); color: #fff; }
-  .msg.user .bubble.md a { color: #fff; text-decoration: underline; }
+  .msg.human .bubble.md code { background: rgba(255,255,255,.2); color: #fff; }
+  .msg.human .bubble.md a { color: #fff; text-decoration: underline; }
 
   /* ——— modal ——— */
   .modal-overlay {
@@ -664,7 +633,7 @@ async function switchSession(id) {
       for (const m of d.data.messages) {
         addMessage(m.role, m.content);
       }
-      const firstUser = d.data.messages.find(m => m.role === 'user');
+      const firstUser = d.data.messages.find(m => m.role === 'human');
       if (firstUser) title = firstUser.content.slice(0, 30) + (firstUser.content.length > 30 ? '...' : '');
     }
   } catch(e) {
@@ -758,7 +727,7 @@ async function send() {
     } catch(e) {}
   }
 
-  addMessage('user', msg);
+  addMessage('human', msg);
   if (!sessionId) {
     return;
   }
@@ -782,7 +751,7 @@ async function sendStream(msg) {
   let streamErr = null;
 
   try {
-    const r = await authFetch(apiBase + '/chat/stream', {
+    const r = await authFetch(apiBase + '/chat/completion', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: sessionId, message: msg, agent_id: activeAgentId })
@@ -816,12 +785,6 @@ async function sendStream(msg) {
           break;
         case 'thinking':
           showThinking(parsed ? parsed.iteration : 0);
-          break;
-        case 'tool_start':
-          if (parsed) addToolBlock(parsed);
-          break;
-        case 'tool_end':
-          if (parsed) updateToolBlock(parsed);
           break;
         case 'chunk': {
           hideThinking();
@@ -875,11 +838,11 @@ async function sendStream(msg) {
     }
 
     el.classList.remove('streaming');
-    if (streamErr) { showError(streamErr); if (!fullText) bubble.innerHTML = renderContent('assistant', '(响应错误)'); }
+    if (streamErr) { showError(streamErr); if (!fullText) bubble.innerHTML = renderContent('ai', '(响应错误)'); }
     if (!fullText && !streamErr) { bubble.innerHTML = '(空响应)'; }
   } catch(e) {
     el.classList.remove('streaming');
-    bubble.innerHTML = renderContent('assistant', fullText || '(连接中断)');
+    bubble.innerHTML = renderContent('ai', fullText || '(连接中断)');
     showError('连接错误: ' + e.message);
   } finally {
     streamingMsgEl = null;
@@ -905,69 +868,8 @@ function hideThinking() {
   if (indicator) indicator.remove();
 }
 
-function addToolBlock(data) {
-  const main = document.getElementById('messages');
-  hideThinking();
-  const block = document.createElement('div');
-  block.className = 'tool-block';
-  block.id = 'tool-' + data.tool_call_id;
-  let argsDisplay = '';
-  try {
-    const parsed = typeof data.arguments === 'string' ? JSON.parse(data.arguments) : data.arguments;
-    argsDisplay = JSON.stringify(parsed, null, 2);
-  } catch(e) {
-    argsDisplay = typeof data.arguments === 'string' ? data.arguments : JSON.stringify(data.arguments);
-  }
-  block.innerHTML = `
-    <div class="tool-block-header" onclick="this.parentElement.classList.toggle('expanded')">
-      <span class="tool-icon">🔧</span>
-      <span class="tool-name">${escapeHtml(data.name)}</span>
-      <span class="tool-status running">执行中</span>
-      <span class="toggle-arrow">▶</span>
-    </div>
-    <div class="tool-block-body">
-      <div class="tool-section">
-        <div class="tool-section-title">输入参数</div>
-        <pre>${escapeHtml(argsDisplay)}</pre>
-      </div>
-      <div class="tool-section tool-result-section" style="display:none">
-        <div class="tool-section-title">返回结果</div>
-        <pre class="tool-result-pre"></pre>
-      </div>
-    </div>`;
-  main.appendChild(block);
-  main.scrollTop = main.scrollHeight;
-}
-
-function updateToolBlock(data) {
-  const block = document.getElementById('tool-' + data.tool_call_id);
-  if (!block) return;
-  const status = block.querySelector('.tool-status');
-  if (data.success) {
-    status.textContent = '成功';
-    status.className = 'tool-status success';
-  } else {
-    status.textContent = '失败';
-    status.className = 'tool-status error';
-  }
-  const resultSection = block.querySelector('.tool-result-section');
-  const resultPre = block.querySelector('.tool-result-pre');
-  if (resultSection && resultPre) {
-    let resultDisplay = '';
-    try {
-      const parsed = typeof data.result === 'string' ? JSON.parse(data.result) : data.result;
-      resultDisplay = JSON.stringify(parsed, null, 2);
-    } catch(e) {
-      resultDisplay = typeof data.result === 'string' ? data.result : JSON.stringify(data.result);
-    }
-    resultPre.textContent = resultDisplay;
-    resultSection.style.display = 'block';
-  }
-  block.classList.add('expanded');
-}
-
 function renderContent(role, text) {
-  if (role === 'assistant' && typeof marked !== 'undefined') {
+  if (role === 'ai' && typeof marked !== 'undefined') {
     // Collapse 3+ consecutive newlines into 2 (one blank line).
     const cleaned = text.replace(/\n{3,}/g, '\n\n');
     return marked.parse(cleaned);
@@ -976,73 +878,13 @@ function renderContent(role, text) {
 }
 
 function addMessage(role, text) {
+  if (role === 'function' || role === 'tool') return;
+
   const main = document.getElementById('messages');
-
-  // Handle tool call messages (role=assistant_tool_call or role=4)
-  if (role === 'assistant_tool_call' || role === 4) {
-    try {
-      const data = JSON.parse(text);
-      const toolCalls = data.tool_calls || [];
-      for (const tc of toolCalls) {
-        addToolBlock({
-          tool_call_id: tc.id || ('hist-' + Math.random().toString(36).slice(2, 8)),
-          name: tc.name,
-          arguments: tc.arguments
-        });
-      }
-    } catch(e) {}
-    return;
-  }
-
-  // Handle tool result messages (role=tool or role=3)
-  if (role === 'tool' || role === 3) {
-    try {
-      const data = JSON.parse(text);
-      const blockId = 'tool-' + data.tool_call_id;
-      const block = document.getElementById(blockId);
-      if (block) {
-        updateToolBlock({
-          tool_call_id: data.tool_call_id,
-          name: data.name,
-          result: data.result,
-          success: !data.result?.startsWith?.('Error:')
-        });
-      } else {
-        // No matching tool_start block — render standalone
-        const div = document.createElement('div');
-        div.className = 'tool-block expanded';
-        let resultDisplay = data.result || text;
-        div.innerHTML = `
-          <div class="tool-block-header" onclick="this.parentElement.classList.toggle('expanded')">
-            <span class="tool-icon">🔧</span>
-            <span class="tool-name">${escapeHtml(data.name || 'tool')}</span>
-            <span class="tool-status success">完成</span>
-            <span class="toggle-arrow">▶</span>
-          </div>
-          <div class="tool-block-body">
-            <div class="tool-section">
-              <div class="tool-section-title">返回结果</div>
-              <pre>${escapeHtml(resultDisplay)}</pre>
-            </div>
-          </div>`;
-        main.appendChild(div);
-      }
-    } catch(e) {
-      // Fallback: render as plain tool bubble
-      const div = document.createElement('div');
-      div.className = 'msg tool';
-      div.innerHTML = `<div class="role">Tool</div><div class="bubble">${escapeHtml(text)}</div>`;
-      main.appendChild(div);
-    }
-    main.scrollTop = main.scrollHeight;
-    return;
-  }
-
-  // Standard user/assistant messages
   const div = document.createElement('div');
   div.className = 'msg ' + role;
-  const roleLabel = role === 'user' ? 'You' : role === 'assistant' ? 'Assistant' : 'Tool';
-  const bubbleClass = role === 'assistant' ? 'bubble md' : 'bubble';
+  const roleLabel = role === 'human' ? 'You' : 'AI';
+  const bubbleClass = role === 'ai' ? 'bubble md' : 'bubble';
   div.innerHTML = `<div class="role">${roleLabel}</div><div class="${bubbleClass}">${renderContent(role, text)}</div>`;
   main.appendChild(div);
   main.scrollTop = main.scrollHeight;
@@ -1052,9 +894,9 @@ function addMessage(role, text) {
 function addAssistantPlaceholder(text) {
   const main = document.getElementById('messages');
   const div = document.createElement('div');
-  div.className = 'msg assistant';
-  const content = text ? renderContent('assistant', text) : '';
-  div.innerHTML = `<div class="role">Assistant</div><div class="bubble md">${content}</div>`;
+  div.className = 'msg ai';
+  const content = text ? renderContent('ai', text) : '';
+  div.innerHTML = `<div class="role">AI</div><div class="bubble md">${content}</div>`;
   main.appendChild(div);
   main.scrollTop = main.scrollHeight;
   return div;

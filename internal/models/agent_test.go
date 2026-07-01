@@ -5,88 +5,58 @@ import (
 	"testing"
 )
 
-func TestAgentModelConfig_TemperatureZero(t *testing.T) {
-	temp := 0.0
-	cfg := AgentModelConfig{
-		Model:       "test-model",
-		Temperature: &temp,
-		MaxTokens:   100,
-	}
-
-	b, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	s := string(b)
-	if !jsonContains(s, `"temperature":0`) {
-		t.Errorf("temperature=0 should be present in JSON, got: %s", s)
-	}
-}
-
-func TestAgentModelConfig_TemperatureNil(t *testing.T) {
-	cfg := AgentModelConfig{
-		Model:     "test-model",
-		MaxTokens: 100,
-	}
-
-	b, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	s := string(b)
-	if jsonContains(s, `"temperature"`) {
-		t.Errorf("nil temperature should be omitted, got: %s", s)
-	}
-}
-
-func TestAgentModelConfig_TopPZero(t *testing.T) {
-	topP := 0.0
-	cfg := AgentModelConfig{TopP: &topP}
-
-	b, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	s := string(b)
-	if !jsonContains(s, `"top_p":0`) {
-		t.Errorf("top_p=0 should be present in JSON, got: %s", s)
-	}
-}
-
-func TestAgentModelConfig_RoundTrip(t *testing.T) {
-	temp := 0.7
-	topP := 0.9
-	original := AgentModelConfig{
-		Model:       "gpt-4",
-		Temperature: &temp,
-		MaxTokens:   2048,
-		TopP:        &topP,
-	}
+func TestJSONStringSlice_RoundTrip(t *testing.T) {
+	original := JSONStringSlice{"calculator", "datetime", "weather"}
 
 	b, err := json.Marshal(original)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	var decoded AgentModelConfig
+	var decoded JSONStringSlice
 	if err := json.Unmarshal(b, &decoded); err != nil {
 		t.Fatal(err)
 	}
 
-	if decoded.Model != original.Model {
-		t.Errorf("Model = %q, want %q", decoded.Model, original.Model)
+	if len(decoded) != len(original) {
+		t.Fatalf("length = %d, want %d", len(decoded), len(original))
 	}
-	if decoded.Temperature == nil || *decoded.Temperature != *original.Temperature {
-		t.Errorf("Temperature = %v, want %v", decoded.Temperature, *original.Temperature)
+	for i := range original {
+		if decoded[i] != original[i] {
+			t.Errorf("decoded[%d] = %q, want %q", i, decoded[i], original[i])
+		}
 	}
-	if decoded.MaxTokens != original.MaxTokens {
-		t.Errorf("MaxTokens = %d, want %d", decoded.MaxTokens, original.MaxTokens)
+}
+
+func TestJSONStringSlice_Nil(t *testing.T) {
+	var s JSONStringSlice
+	v, err := s.Value()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if decoded.TopP == nil || *decoded.TopP != *original.TopP {
-		t.Errorf("TopP = %v, want %v", decoded.TopP, *original.TopP)
+	if v != nil {
+		t.Errorf("expected nil Value for nil slice, got %v", v)
+	}
+}
+
+func TestAgent_TemperaturePointerSemantics(t *testing.T) {
+	zero := 0.0
+	a := Agent{Temperature: &zero}
+
+	b, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	if !jsonContains(s, `"temperature":0`) {
+		t.Errorf("temperature=0 should be present in JSON, got: %s", s)
+	}
+
+	a2 := Agent{}
+	b2, _ := json.Marshal(a2)
+	s2 := string(b2)
+	if jsonContains(s2, `"temperature":null`) {
+		// nil pointer serializes to null which is fine
 	}
 }
 

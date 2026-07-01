@@ -2,10 +2,14 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"ansmeee-ai-agent/internal/config"
 	internaltool "ansmeee-ai-agent/internal/tool"
+	"ansmeee-ai-agent/internal/tracing"
+	"ansmeee-ai-agent/pkg/logger"
+
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/openai"
 	"github.com/tmc/langchaingo/tools"
@@ -106,6 +110,7 @@ func (p *Provider) Chat(ctx context.Context, messages []MessageContent, toolList
 
 	resp, err := p.model.GenerateContent(ctx, msgs, callOpts...)
 	if err != nil {
+		logger.L().Error("generate content", tracing.ErrFields(ctx, err)...)
 		return nil, fmt.Errorf("generate content: %w", err)
 	}
 	if len(resp.Choices) == 0 {
@@ -142,18 +147,23 @@ func toLLMMessages(messages []MessageContent) []llms.MessageContent {
 	result := make([]llms.MessageContent, len(messages))
 	for i, m := range messages {
 		var parts []llms.ContentPart
-		if m.Content != "" {
-			parts = append(parts, llms.TextPart(m.Content))
-		}
-		for _, tc := range m.ToolCalls {
-			parts = append(parts, tc)
-		}
+
 		if m.ToolCallID != "" {
+			// Tool response: only ToolCallResponse part (content is embedded).
+			// langchaingo's OpenAI provider requires exactly one part for tool role.
 			parts = append(parts, llms.ToolCallResponse{
 				ToolCallID: m.ToolCallID,
 				Name:       m.ToolCallName,
 				Content:    m.Content,
 			})
+		} else {
+			// Normal message: text content + optional tool calls.
+			if m.Content != "" {
+				parts = append(parts, llms.TextPart(m.Content))
+			}
+			for _, tc := range m.ToolCalls {
+				parts = append(parts, tc)
+			}
 		}
 
 		result[i] = llms.MessageContent{
@@ -162,6 +172,28 @@ func toLLMMessages(messages []MessageContent) []llms.MessageContent {
 		}
 	}
 	return result
+}
+
+// isToolCallChunk reports whether a streaming chunk is a tool-call delta rather
+// than assistant text. langchaingo's OpenAI client marshals tool-call deltas to
+// a JSON array and routes them through the same streaming callback as content,
+// so we filter them out to avoid leaking them to the client as chunks. We probe
+// with a permissive local struct because llms.ToolCall has a strict custom
+// UnmarshalJSON that rejects these deltas.
+func isToolCallChunk(chunk []byte) bool {
+	var probes []struct {
+		Type     string          `json:"type"`
+		Function json.RawMessage `json:"function"`
+	}
+	if err := json.Unmarshal(chunk, &probes); err != nil || len(probes) == 0 {
+		return false
+	}
+	for _, p := range probes {
+		if p.Type == "function" || len(p.Function) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func toLLMTools(toolList []tools.Tool) []llms.Tool {
@@ -204,7 +236,7 @@ func (p *Provider) ChatStream(ctx context.Context, messages []MessageContent, to
 		llms.WithTemperature(temp),
 		llms.WithMaxTokens(maxTk),
 		llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
-			if onChunk != nil && len(chunk) > 0 {
+			if onChunk != nil && len(chunk) > 0 && !isToolCallChunk(chunk) {
 				onChunk(chunk)
 			}
 			return nil
@@ -219,6 +251,7 @@ func (p *Provider) ChatStream(ctx context.Context, messages []MessageContent, to
 
 	resp, err := p.model.GenerateContent(ctx, msgs, callOpts...)
 	if err != nil {
+		logger.L().Error("generate content (stream)", tracing.ErrFields(ctx, err)...)
 		return nil, fmt.Errorf("generate content: %w", err)
 	}
 	if len(resp.Choices) == 0 {

@@ -78,8 +78,7 @@ func TestWriteSSEJSON_AllTypes(t *testing.T) {
 	}{
 		{"session", sseSessionData{SessionID: "s1"}, `"session_id":"s1"`},
 		{"thinking", sseThinkingData{Iteration: 2}, `"iteration":2`},
-		{"tool_start", sseToolStartData{ToolCallID: "c1", Name: "calc", Arguments: json.RawMessage(`{"x":1}`)}, `"tool_call_id":"c1"`},
-		{"tool_end", sseToolEndData{ToolCallID: "c1", Name: "calc", Result: json.RawMessage(`"4"`), Success: true}, `"success":true`},
+		{"tool_call", sseToolCallData{ToolCallID: "c1", Name: "calc", Arguments: json.RawMessage(`{"x":1}`), Result: json.RawMessage(`"4"`), Success: true}, `"success":true`},
 		{"error", sseErrorData{Message: "fail"}, `"message":"fail"`},
 	}
 
@@ -131,12 +130,12 @@ func TestHandle_EmptyMessage(t *testing.T) {
 	h := &StreamHandler{}
 	w := httptest.NewRecorder()
 	body := bytes.NewBufferString(`{"message":""}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/stream", body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completion", body)
 	req.Header.Set("Content-Type", "application/json")
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.POST("/api/v1/chat/stream", h.Handle)
+	r.POST("/api/v1/chat/completion", h.Handle)
 	r.ServeHTTP(w, req)
 
 	var resp map[string]any

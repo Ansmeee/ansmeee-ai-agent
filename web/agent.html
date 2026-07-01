@@ -270,11 +270,10 @@ function fillForm(a) {
   renderToolsList(a.tools || []);
 
   // Model config
-  const mc = a.model_config || {};
-  const temp = mc.temperature != null ? mc.temperature : 0.7;
+  const temp = a.temperature != null ? a.temperature : 0.7;
   document.getElementById('cfgTemp').value = temp;
   document.getElementById('cfgTempVal').textContent = temp;
-  document.getElementById('cfgMaxTokens').value = mc.max_tokens || 1024;
+  document.getElementById('cfgMaxTokens').value = a.max_tokens || 1024;
   document.getElementById('cfgMaxIter').value = a.max_iterations || 5;
 }
 
@@ -292,7 +291,7 @@ async function saveAgent() {
 
   const body = {
     title, description, prompt, tools,
-    model_config: { temperature, max_tokens: maxTokens },
+    temperature, max_tokens: maxTokens,
     max_iterations: maxIterations
   };
 

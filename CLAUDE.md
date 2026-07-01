@@ -85,7 +85,7 @@ Protected routes under `/api/v1/*` require Bearer token (JWT with HS256, 7-day e
 | POST | `/api/v1/auth/register` | No | Register (email + password) |
 | POST | `/api/v1/auth/login` | No | Login, returns JWT |
 | GET | `/api/v1/auth/me` | Yes | Current user info |
-| POST | `/api/v1/chat/stream` | Yes | Streaming chat (SSE) |
+| POST | `/api/v1/chat/completion` | Yes | Streaming chat (SSE) |
 | GET | `/api/v1/chat/:sessionId` | Yes | Get chat history |
 | DELETE | `/api/v1/chat/:sessionId` | Yes | Delete session |
 | POST | `/api/v1/sessions` | Yes | Create session |

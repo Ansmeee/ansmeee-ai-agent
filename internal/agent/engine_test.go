@@ -136,10 +136,10 @@ func TestBuildMessages_WithToolHistory(t *testing.T) {
 	e := &Engine{maxContextMessages: 50}
 
 	history := []memory.Message{
-		{Role: "user", Content: "what is 2+2?"},
-		{Role: "assistant_tool_call", Content: `{"tool_calls":[{"id":"c1","name":"calculator","arguments":"2+2"}]}`},
-		{Role: "tool", Content: `{"tool_call_id":"c1","name":"calculator","result":"4"}`},
-		{Role: "assistant", Content: "The answer is 4."},
+		{Role: models.RoleHuman, Content: "what is 2+2?"},
+		{Role: models.RoleFunction, Content: `{"tool_calls":[{"id":"c1","name":"calculator","arguments":"2+2"}]}`},
+		{Role: models.RoleTool, Content: `{"tool_call_id":"c1","name":"calculator","result":"4"}`},
+		{Role: models.RoleAI, Content: "The answer is 4."},
 	}
 
 	msgs := e.buildMessages("system prompt", history)
@@ -184,9 +184,9 @@ func TestBuildMessages_EmptyHistory(t *testing.T) {
 func TestBuildMessages_InvalidJSON(t *testing.T) {
 	e := &Engine{maxContextMessages: 50}
 	history := []memory.Message{
-		{Role: "assistant_tool_call", Content: "not json"},
-		{Role: "tool", Content: "also not json"},
-		{Role: "assistant", Content: "final"},
+		{Role: models.RoleFunction, Content: "not json"},
+		{Role: models.RoleTool, Content: "also not json"},
+		{Role: models.RoleAI, Content: "final"},
 	}
 	msgs := e.buildMessages("sys", history)
 	// Invalid JSON messages are silently skipped; only system + assistant remain
@@ -197,12 +197,12 @@ func TestBuildMessages_InvalidJSON(t *testing.T) {
 
 func TestTrimHistory_KeepPairs(t *testing.T) {
 	history := []memory.Message{
-		{Role: "user", Content: "msg1"},
-		{Role: "assistant_tool_call", Content: "tc1"},
-		{Role: "tool", Content: "tr1"},
-		{Role: "assistant", Content: "reply1"},
-		{Role: "user", Content: "msg2"},
-		{Role: "assistant", Content: "reply2"},
+		{Role: models.RoleHuman, Content: "msg1"},
+		{Role: models.RoleFunction, Content: "tc1"},
+		{Role: models.RoleTool, Content: "tr1"},
+		{Role: models.RoleAI, Content: "reply1"},
+		{Role: models.RoleHuman, Content: "msg2"},
+		{Role: models.RoleAI, Content: "reply2"},
 	}
 
 	// Trim to 3 — start=3 → history[3] is "assistant" (reply1), no back-up needed
@@ -210,7 +210,7 @@ func TestTrimHistory_KeepPairs(t *testing.T) {
 	if len(trimmed) != 3 {
 		t.Fatalf("expected 3 messages, got %d", len(trimmed))
 	}
-	if trimmed[0].Role != "assistant" || trimmed[0].Content != "reply1" {
+	if trimmed[0].Role != models.RoleAI || trimmed[0].Content != "reply1" {
 		t.Errorf("first trimmed = %v, expected reply1", trimmed[0])
 	}
 
@@ -231,8 +231,8 @@ func TestTrimHistory_KeepPairs(t *testing.T) {
 	if len(trimmed) != 5 {
 		t.Fatalf("expected 5 messages (backed up to include tool_call), got %d", len(trimmed))
 	}
-	if trimmed[0].Role != "assistant_tool_call" {
-		t.Errorf("first trimmed should be assistant_tool_call, got %s", trimmed[0].Role)
+	if trimmed[0].Role != models.RoleFunction {
+		t.Errorf("first trimmed should be function (tool_call carrier), got %s", trimmed[0].Role)
 	}
 }
 
@@ -248,18 +248,16 @@ func TestBuildChatOptions(t *testing.T) {
 	// nil ModelConfig → nil options
 	opts = e.buildChatOptions(&AgentConfig{})
 	if opts != nil {
-		t.Error("expected nil for nil ModelConfig")
+		t.Error("expected nil for empty AgentConfig")
 	}
 
 	// Full config
 	temp := 0.5
 	topP := 0.9
 	opts = e.buildChatOptions(&AgentConfig{
-		ModelConfig: &models.AgentModelConfig{
-			Temperature: &temp,
-			MaxTokens:   1000,
-			TopP:        &topP,
-		},
+		Temperature: &temp,
+		MaxTokens:   1000,
+		TopP:        &topP,
 	})
 	if len(opts) != 3 {
 		t.Errorf("expected 3 options, got %d", len(opts))
@@ -268,9 +266,7 @@ func TestBuildChatOptions(t *testing.T) {
 	// Temperature=0 should still produce an option (pointer is non-nil)
 	zero := 0.0
 	opts = e.buildChatOptions(&AgentConfig{
-		ModelConfig: &models.AgentModelConfig{
-			Temperature: &zero,
-		},
+		Temperature: &zero,
 	})
 	if len(opts) != 1 {
 		t.Errorf("expected 1 option for temp=0, got %d", len(opts))
@@ -365,7 +361,7 @@ func (te *testableEngine) processStream(ctx context.Context, sessionID, msg stri
 			maxIter = agentCfg.MaxIterations
 		}
 
-		if err := te.mem.AddMessage(ctx, sessionID, memory.Message{Role: "user", Content: msg}, userID); err != nil {
+		if err := te.mem.AddMessage(ctx, sessionID, memory.Message{Role: models.RoleHuman, Content: msg}, userID); err != nil {
 			ch <- StreamEvent{Type: "error", Error: err}
 			return
 		}
@@ -394,7 +390,7 @@ func (te *testableEngine) processStream(ctx context.Context, sessionID, msg stri
 					ch <- StreamEvent{Type: "chunk", Content: result.Content}
 				}
 				te.mem.AddMessage(ctx, sessionID, memory.Message{
-					Role: "assistant", Content: result.Content,
+					Role: models.RoleAI, Content: result.Content,
 				}, userID)
 				te.callback.OnLLMEnd(ctx, sessionID, 0, 0)
 				ch <- StreamEvent{Type: "done", Content: sessionID}
@@ -402,7 +398,7 @@ func (te *testableEngine) processStream(ctx context.Context, sessionID, msg stri
 			}
 
 			toolCallMsg := memory.Message{
-				Role:    "assistant_tool_call",
+				Role:    models.RoleFunction,
 				Content: buildToolCallJSON(result.ToolCalls),
 			}
 			te.mem.AddMessage(ctx, sessionID, toolCallMsg, userID)
@@ -486,8 +482,8 @@ func TestProcessStream_NoTools(t *testing.T) {
 	if !containsStr(types, "done") {
 		t.Error("missing done event")
 	}
-	if containsStr(types, "tool_start") {
-		t.Error("unexpected tool_start in no-tools mode")
+	if containsStr(types, "tool_call") {
+		t.Error("unexpected tool_call in no-tools mode")
 	}
 }
 
@@ -506,11 +502,8 @@ func TestProcessStream_SingleToolCall(t *testing.T) {
 	events := collectEvents(ch)
 	types := findEventTypes(events)
 
-	if !containsStr(types, "tool_start") {
-		t.Error("missing tool_start")
-	}
-	if !containsStr(types, "tool_end") {
-		t.Error("missing tool_end")
+	if !containsStr(types, "tool_call") {
+		t.Error("missing tool_call")
 	}
 	if calc.callCount != 1 {
 		t.Errorf("calculator called %d times, want 1", calc.callCount)
@@ -532,14 +525,14 @@ func TestProcessStream_MultiRound(t *testing.T) {
 	ch := te.processStream(context.Background(), "s1", "complex calc", cfg, 1)
 	events := collectEvents(ch)
 
-	toolStarts := 0
+	toolCalls := 0
 	for _, e := range events {
-		if e.Type == "tool_start" {
-			toolStarts++
+		if e.Type == "tool_call" {
+			toolCalls++
 		}
 	}
-	if toolStarts != 2 {
-		t.Errorf("expected 2 tool_start events, got %d", toolStarts)
+	if toolCalls != 2 {
+		t.Errorf("expected 2 tool_call events, got %d", toolCalls)
 	}
 }
 
@@ -559,14 +552,14 @@ func TestProcessStream_ParallelTools(t *testing.T) {
 	ch := te.processStream(context.Background(), "s1", "calc and date", cfg, 1)
 	events := collectEvents(ch)
 
-	toolStarts := 0
+	toolCalls := 0
 	for _, e := range events {
-		if e.Type == "tool_start" {
-			toolStarts++
+		if e.Type == "tool_call" {
+			toolCalls++
 		}
 	}
-	if toolStarts != 2 {
-		t.Errorf("expected 2 tool_start events, got %d", toolStarts)
+	if toolCalls != 2 {
+		t.Errorf("expected 2 tool_call events, got %d", toolCalls)
 	}
 	if calc.callCount != 1 || dt.callCount != 1 {
 		t.Errorf("calc=%d dt=%d, both should be 1", calc.callCount, dt.callCount)
@@ -614,12 +607,12 @@ func TestProcessStream_ToolTimeout(t *testing.T) {
 
 	found := false
 	for _, e := range events {
-		if e.Type == "tool_end" && !e.Success {
+		if e.Type == "tool_call" && !e.Success {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected failed tool_end event for timeout")
+		t.Error("expected failed tool_call event for timeout")
 	}
 }
 
@@ -639,12 +632,12 @@ func TestProcessStream_ToolPanic(t *testing.T) {
 
 	found := false
 	for _, e := range events {
-		if e.Type == "tool_end" && !e.Success && strings.Contains(e.Result, "panic") {
+		if e.Type == "tool_call" && !e.Success && strings.Contains(e.Result, "panic") {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected tool_end with panic error")
+		t.Error("expected tool_call with panic error")
 	}
 }
 
@@ -694,12 +687,12 @@ func TestProcessStream_ToolNotFound(t *testing.T) {
 
 	found := false
 	for _, e := range events {
-		if e.Type == "tool_end" && !e.Success {
+		if e.Type == "tool_call" && !e.Success {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected failed tool_end for unknown tool")
+		t.Error("expected failed tool_call for unknown tool")
 	}
 }
 
@@ -721,7 +714,7 @@ func TestProcessStream_ContextCancel(t *testing.T) {
 
 	hasFailure := false
 	for _, e := range events {
-		if e.Type == "tool_end" && !e.Success {
+		if e.Type == "tool_call" && !e.Success {
 			hasFailure = true
 		}
 	}

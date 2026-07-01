@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +12,10 @@ import (
 	"ansmeee-ai-agent/internal/memory"
 	"ansmeee-ai-agent/internal/middleware"
 	"ansmeee-ai-agent/internal/models"
+	"ansmeee-ai-agent/internal/tracing"
+	"ansmeee-ai-agent/pkg/logger"
 	"ansmeee-ai-agent/pkg/response"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -23,14 +27,10 @@ type sseChunkData struct {
 type sseThinkingData struct {
 	Iteration int `json:"iteration"`
 }
-type sseToolStartData struct {
+type sseToolCallData struct {
 	ToolCallID string          `json:"tool_call_id"`
 	Name       string          `json:"name"`
 	Arguments  json.RawMessage `json:"arguments"`
-}
-type sseToolEndData struct {
-	ToolCallID string          `json:"tool_call_id"`
-	Name       string          `json:"name"`
 	Result     json.RawMessage `json:"result"`
 	Success    bool            `json:"success"`
 }
@@ -54,11 +54,11 @@ func NewStreamHandler(engine *agent.Engine, mem memory.SessionStore, agentStore 
 	return &StreamHandler{engine: engine, mem: mem, agentStore: agentStore, modelConfigStore: modelConfigStore}
 }
 
-func (h *StreamHandler) resolveAgentConfig(agentID string, userID int64) (*agent.AgentConfig, error) {
+func (h *StreamHandler) resolveAgentConfig(ctx context.Context, agentID string, userID int64) (*agent.AgentConfig, error) {
 	if agentID == "" || h.agentStore == nil {
 		return nil, nil
 	}
-	a, err := h.agentStore.Get(agentID, userID)
+	a, err := h.agentStore.Get(ctx, agentID, userID)
 	if err != nil {
 		if errors.Is(err, agent.ErrAgentNotFound) {
 			return nil, nil
@@ -71,16 +71,18 @@ func (h *StreamHandler) resolveAgentConfig(agentID string, userID int64) (*agent
 	cfg := &agent.AgentConfig{
 		Prompt:        a.Prompt,
 		Tools:         []string(a.Tools),
+		Model:         a.Model,
+		Temperature:   a.Temperature,
+		MaxTokens:     a.MaxTokens,
+		TopP:          a.TopP,
 		MaxIterations: int(a.MaxIterations),
-	}
-	if a.ModelConfig != nil {
-		cfg.ModelConfig = a.ModelConfig
 	}
 	return cfg, nil
 }
 
 // Handle processes a streaming chat request via SSE.
 func (h *StreamHandler) Handle(c *gin.Context) {
+	ctx := c.Request.Context()
 	var req ChatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "message is required")
@@ -111,12 +113,15 @@ func (h *StreamHandler) Handle(c *gin.Context) {
 	// Record agent for this session.
 	userID := c.GetInt64(middleware.CtxUserID)
 	if req.AgentID != "" {
-		_ = h.mem.SetAgent(c.Request.Context(), sessionID, req.AgentID, userID)
+		if err := h.mem.SetAgent(ctx, sessionID, req.AgentID, userID); err != nil {
+			logger.L().Warn("set agent for session failed", tracing.ErrFields(ctx, err)...)
+		}
 	}
 
 	// Resolve agent config (includes status check).
-	agentCfg, err := h.resolveAgentConfig(req.AgentID, userID)
+	agentCfg, err := h.resolveAgentConfig(ctx, req.AgentID, userID)
 	if err != nil {
+		logger.L().Error("resolve agent config failed", tracing.ErrFields(ctx, err)...)
 		writeSSEJSON(c.Writer, flusher, "error", sseErrorData{Message: err.Error()})
 		return
 	}
@@ -127,11 +132,16 @@ func (h *StreamHandler) Handle(c *gin.Context) {
 	// Resolve user model config.
 	var modelCfg *models.ModelConfig
 	if h.modelConfigStore != nil {
-		modelCfg, _ = h.modelConfigStore.GetByUserAndType(userID, models.ModelTypeChat)
+		var err error
+		modelCfg, err = h.modelConfigStore.GetByUserAndType(ctx, userID, models.ModelTypeChat)
+		if err != nil {
+			logger.L().Warn("get model config failed", tracing.ErrFields(ctx, err)...)
+			// Non-fatal: continue with default config.
+		}
 	}
 
 	// Process stream.
-	ch := h.engine.ProcessStream(c.Request.Context(), sessionID, req.Message, agentCfg, modelCfg, userID)
+	ch := h.engine.ProcessStream(ctx, sessionID, req.Message, agentCfg, modelCfg, userID)
 
 	for evt := range ch {
 		switch evt.Type {
@@ -139,16 +149,11 @@ func (h *StreamHandler) Handle(c *gin.Context) {
 			writeSSEJSON(c.Writer, flusher, "chunk", sseChunkData{Content: evt.Content})
 		case "thinking":
 			writeSSEJSON(c.Writer, flusher, "thinking", sseThinkingData{Iteration: evt.Iteration})
-		case "tool_start":
-			writeSSEJSON(c.Writer, flusher, "tool_start", sseToolStartData{
+		case "tool_call":
+			writeSSEJSON(c.Writer, flusher, "tool_call", sseToolCallData{
 				ToolCallID: evt.ToolCallID,
 				Name:       evt.ToolName,
 				Arguments:  ensureJSON(evt.Arguments),
-			})
-		case "tool_end":
-			writeSSEJSON(c.Writer, flusher, "tool_end", sseToolEndData{
-				ToolCallID: evt.ToolCallID,
-				Name:       evt.ToolName,
 				Result:     ensureJSON(evt.Result),
 				Success:    evt.Success,
 			})

@@ -1,13 +1,17 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"ansmeee-ai-agent/internal/middleware"
 	"ansmeee-ai-agent/internal/models"
+	"ansmeee-ai-agent/internal/tracing"
+	"ansmeee-ai-agent/pkg/logger"
 	"ansmeee-ai-agent/pkg/response"
+
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -38,6 +42,7 @@ type registerRequest struct {
 
 // Register creates a new user account.
 func (h *AuthHandler) Register(c *gin.Context) {
+	ctx := c.Request.Context()
 	var req registerRequest
 	if err := c.ShouldBindJSON(&req); err != nil || req.Email == "" || req.Password == "" {
 		response.BadRequest(c, "email and password are required")
@@ -50,13 +55,20 @@ func (h *AuthHandler) Register(c *gin.Context) {
 
 	// Check if user already exists.
 	var existing models.User
-	if err := h.db.Where("email = ?", req.Email).First(&existing).Error; err == nil {
+	err := h.db.WithContext(ctx).Where("email = ?", req.Email).First(&existing).Error
+	if err == nil {
 		response.Fail(c, http.StatusConflict, response.CodeBadRequest, "email already registered")
+		return
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		logger.L().Error("check email uniqueness failed", tracing.ErrFields(ctx, err)...)
+		response.InternalError(c, "database error")
 		return
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
+		logger.L().Error("hash password failed", tracing.ErrFields(ctx, err)...)
 		response.InternalError(c, "failed to hash password")
 		return
 	}
@@ -67,13 +79,15 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		Password: string(hash),
 		Status:   1,
 	}
-	if err := h.db.Create(&user).Error; err != nil {
+	if err := h.db.WithContext(ctx).Create(&user).Error; err != nil {
+		logger.L().Error("create user failed", tracing.ErrFields(ctx, err)...)
 		response.InternalError(c, "failed to create user")
 		return
 	}
 
 	token, err := h.generateJWT(user.ID, user.UUID)
 	if err != nil {
+		logger.L().Error("generate JWT failed", tracing.ErrFields(ctx, err)...)
 		response.InternalError(c, "failed to generate token")
 		return
 	}
@@ -92,6 +106,7 @@ type loginRequest struct {
 
 // Login authenticates a user and returns a JWT.
 func (h *AuthHandler) Login(c *gin.Context) {
+	ctx := c.Request.Context()
 	var req loginRequest
 	if err := c.ShouldBindJSON(&req); err != nil || req.Email == "" || req.Password == "" {
 		response.BadRequest(c, "email and password are required")
@@ -99,7 +114,11 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	var user models.User
-	if err := h.db.Where("email = ?", req.Email).First(&user).Error; err != nil {
+	err := h.db.WithContext(ctx).Where("email = ?", req.Email).First(&user).Error
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			logger.L().Error("query user failed", tracing.ErrFields(ctx, err)...)
+		}
 		response.Fail(c, http.StatusUnauthorized, response.CodeUnauthorized, "invalid email or password")
 		return
 	}
@@ -115,6 +134,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	token, err := h.generateJWT(user.ID, user.UUID)
 	if err != nil {
+		logger.L().Error("generate JWT failed", tracing.ErrFields(ctx, err)...)
 		response.InternalError(c, "failed to generate token")
 		return
 	}

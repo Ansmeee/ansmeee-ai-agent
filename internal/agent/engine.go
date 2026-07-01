@@ -13,6 +13,8 @@ import (
 	"ansmeee-ai-agent/internal/models"
 	"ansmeee-ai-agent/internal/tool"
 	"ansmeee-ai-agent/internal/tracing"
+	"ansmeee-ai-agent/pkg/logger"
+
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/tools"
 	"go.uber.org/zap"
@@ -88,7 +90,10 @@ func New(llmProvider *llm.Provider, reg *tool.Registry, mem memory.SessionStore,
 type AgentConfig struct {
 	Prompt            string
 	Tools             []string
-	ModelConfig       *models.AgentModelConfig
+	Model             string
+	Temperature       *float64
+	MaxTokens         int
+	TopP              *float64
 	MaxIterations     int
 	ParallelToolCalls *bool
 }
@@ -128,12 +133,16 @@ func (e *Engine) ProcessStream(ctx context.Context, sessionID, userMessage strin
 			maxIter = agentCfg.MaxIterations
 		}
 
-		if err := e.mem.AddMessage(ctx, sessionID, memory.Message{Role: "user", Content: userMessage}, userID); err != nil {
+		if err := e.mem.AddMessage(ctx, sessionID, memory.Message{Role: models.RoleHuman, Content: userMessage}, userID); err != nil {
+			logger.L().Error("save user message failed", tracing.ErrFields(ctx, err)...)
 			ch <- StreamEvent{Type: "error", Error: fmt.Errorf("save user message: %w", err)}
 			return
 		}
 
-		history, _ := e.mem.History(ctx, sessionID)
+		history, err := e.mem.History(ctx, sessionID)
+		if err != nil {
+			logger.L().Warn("load history failed, starting fresh", tracing.ErrFields(ctx, err)...)
+		}
 		messages := e.buildMessages(prompt, history)
 
 		filteredTools := e.resolveTools(agentCfg)
@@ -154,7 +163,9 @@ func (e *Engine) ProcessStream(ctx context.Context, sessionID, userMessage strin
 				ch <- StreamEvent{Type: "chunk", Content: string(chunk)}
 				streamed = true
 			}, chatOpts...)
+
 			if err != nil {
+				logger.L().Error("chat stream failed", tracing.ErrFields(ctx, err)...)
 				ch <- StreamEvent{Type: "error", Error: err}
 				return
 			}
@@ -164,7 +175,7 @@ func (e *Engine) ProcessStream(ctx context.Context, sessionID, userMessage strin
 					ch <- StreamEvent{Type: "chunk", Content: result.Content}
 				}
 				e.saveMessage(ctx, sessionID, memory.Message{
-					Role: "assistant", Content: result.Content,
+					Role: models.RoleAI, Content: result.Content,
 				}, userID)
 				e.callback.OnLLMEnd(ctx, sessionID, 0, 0)
 				ch <- StreamEvent{Type: "done", Content: sessionID}
@@ -172,7 +183,7 @@ func (e *Engine) ProcessStream(ctx context.Context, sessionID, userMessage strin
 			}
 
 			toolCallMsg := memory.Message{
-				Role:    "assistant_tool_call",
+				Role:    models.RoleFunction,
 				Content: buildToolCallJSON(result.ToolCalls),
 			}
 			e.saveMessage(ctx, sessionID, toolCallMsg, userID)
@@ -197,6 +208,7 @@ func (e *Engine) ProcessStream(ctx context.Context, sessionID, userMessage strin
 			streamed = true
 		}, chatOpts...)
 		if err != nil {
+			logger.L().Error("chat stream (final) failed", tracing.ErrFields(ctx, err)...)
 			ch <- StreamEvent{Type: "error", Error: err}
 			return
 		}
@@ -204,7 +216,7 @@ func (e *Engine) ProcessStream(ctx context.Context, sessionID, userMessage strin
 			ch <- StreamEvent{Type: "chunk", Content: result.Content}
 		}
 		e.saveMessage(ctx, sessionID, memory.Message{
-			Role: "assistant", Content: result.Content,
+			Role: models.RoleAI, Content: result.Content,
 		}, userID)
 		e.callback.OnLLMEnd(ctx, sessionID, 0, 0)
 		ch <- StreamEvent{Type: "done", Content: sessionID}
@@ -216,9 +228,11 @@ func (e *Engine) ProcessStream(ctx context.Context, sessionID, userMessage strin
 func (e *Engine) saveMessage(ctx context.Context, sessionID string, msg memory.Message, userID int64) {
 	if err := e.mem.AddMessage(ctx, sessionID, msg, userID); err != nil {
 		e.callback.Logger.Warn("failed to save message",
-			zap.String("session", sessionID),
-			zap.String("role", msg.Role),
-			zap.Error(err),
+			append(tracing.ZapFields(ctx),
+				zap.String("session", sessionID),
+				zap.String("role", msg.Role),
+				zap.Error(err),
+			)...,
 		)
 	}
 }
@@ -239,10 +253,8 @@ func (e *Engine) resolveLLMProvider(agentCfg *AgentConfig, userCfg *models.Model
 		token = userCfg.Token
 	}
 
-	if agentCfg != nil && agentCfg.ModelConfig != nil {
-		if agentCfg.ModelConfig.Model != "" {
-			model = agentCfg.ModelConfig.Model
-		}
+	if agentCfg != nil && agentCfg.Model != "" {
+		model = agentCfg.Model
 	}
 
 	if model == "" {
@@ -251,24 +263,27 @@ func (e *Engine) resolveLLMProvider(agentCfg *AgentConfig, userCfg *models.Model
 
 	if p, err := e.llm.WithOverride(model, baseURL, token); err == nil {
 		return p
+	} else {
+		logger.L().Warn("override LLM provider failed, using default", zap.Error(err))
 	}
 	return e.llm
 }
 
 func (e *Engine) buildChatOptions(agentCfg *AgentConfig) []llm.ChatOption {
-	if agentCfg == nil || agentCfg.ModelConfig == nil {
+	if agentCfg == nil {
 		return nil
 	}
 	var opts []llm.ChatOption
-	if agentCfg.ModelConfig.Temperature != nil {
-		opts = append(opts, llm.WithTemperature(*agentCfg.ModelConfig.Temperature))
+	if agentCfg.Temperature != nil {
+		opts = append(opts, llm.WithTemperature(*agentCfg.Temperature))
 	}
-	if agentCfg.ModelConfig.MaxTokens > 0 {
-		opts = append(opts, llm.WithChatMaxTokens(agentCfg.ModelConfig.MaxTokens))
+	if agentCfg.MaxTokens > 0 {
+		opts = append(opts, llm.WithChatMaxTokens(agentCfg.MaxTokens))
 	}
-	if agentCfg.ModelConfig.TopP != nil {
-		opts = append(opts, llm.WithTopP(*agentCfg.ModelConfig.TopP))
+	if agentCfg.TopP != nil {
+		opts = append(opts, llm.WithTopP(*agentCfg.TopP))
 	}
+
 	return opts
 }
 
@@ -310,11 +325,6 @@ func (e *Engine) executeAndEmitTool(ctx context.Context, ch chan<- StreamEvent, 
 		args = tc.FunctionCall.Arguments
 	}
 
-	ch <- StreamEvent{
-		Type: "tool_start", ToolCallID: tc.ID,
-		ToolName: name, Arguments: args,
-	}
-
 	output, err := e.executeToolWithTimeout(ctx, name, args)
 	success := err == nil
 	resultStr := output
@@ -323,12 +333,13 @@ func (e *Engine) executeAndEmitTool(ctx context.Context, ch chan<- StreamEvent, 
 	}
 
 	ch <- StreamEvent{
-		Type: "tool_end", ToolCallID: tc.ID,
-		ToolName: name, Result: resultStr, Success: success,
+		Type: "tool_call", ToolCallID: tc.ID,
+		ToolName: name, Arguments: args,
+		Result: resultStr, Success: success,
 	}
 
 	e.saveMessage(ctx, sessionID, memory.Message{
-		Role:    "tool",
+		Role:    models.RoleTool,
 		Content: buildToolResultJSON(tc.ID, name, resultStr),
 	}, userID)
 
@@ -346,6 +357,7 @@ func (e *Engine) executeToolsConcurrently(
 		Index   int
 		CallID  string
 		Name    string
+		Args    string
 		Output  string
 		Success bool
 		Message llm.MessageContent
@@ -357,16 +369,10 @@ func (e *Engine) executeToolsConcurrently(
 	g.SetLimit(maxParallelTools)
 
 	for i, tc := range toolCalls {
-		i, tc := i, tc
 		name, args := "", ""
 		if tc.FunctionCall != nil {
 			name = tc.FunctionCall.Name
 			args = tc.FunctionCall.Arguments
-		}
-
-		ch <- StreamEvent{
-			Type: "tool_start", ToolCallID: tc.ID,
-			ToolName: name, Arguments: args,
 		}
 
 		g.Go(func() error {
@@ -380,6 +386,7 @@ func (e *Engine) executeToolsConcurrently(
 			mu.Lock()
 			results[i] = toolResult{
 				Index: i, CallID: tc.ID, Name: name,
+				Args:   args,
 				Output: resultStr, Success: success,
 				Message: llm.MessageContent{
 					Role: llm.RoleTool, Content: resultStr,
@@ -395,13 +402,14 @@ func (e *Engine) executeToolsConcurrently(
 	var msgs []llm.MessageContent
 	for _, r := range results {
 		ch <- StreamEvent{
-			Type: "tool_end", ToolCallID: r.CallID,
-			ToolName: r.Name, Result: r.Output, Success: r.Success,
+			Type: "tool_call", ToolCallID: r.CallID,
+			ToolName: r.Name, Arguments: r.Args,
+			Result: r.Output, Success: r.Success,
 		}
 		msgs = append(msgs, r.Message)
 
 		e.saveMessage(ctx, sessionID, memory.Message{
-			Role:    "tool",
+			Role:    models.RoleTool,
 			Content: buildToolResultJSON(r.CallID, r.Name, r.Output),
 		}, userID)
 	}
@@ -422,11 +430,11 @@ func (e *Engine) buildMessages(systemPrompt string, history []memory.Message) []
 	msgs := []llm.MessageContent{{Role: llm.RoleSystem, Content: systemPrompt}}
 	for _, m := range trimmed {
 		switch m.Role {
-		case "user":
+		case models.RoleHuman:
 			msgs = append(msgs, llm.MessageContent{Role: llm.RoleUser, Content: m.Content})
-		case "assistant":
+		case models.RoleAI:
 			msgs = append(msgs, llm.MessageContent{Role: llm.RoleAssistant, Content: m.Content})
-		case "assistant_tool_call":
+		case models.RoleFunction:
 			var tc toolCallContent
 			if err := json.Unmarshal([]byte(m.Content), &tc); err == nil {
 				msg := llm.MessageContent{Role: llm.RoleAssistant}
@@ -440,14 +448,18 @@ func (e *Engine) buildMessages(systemPrompt string, history []memory.Message) []
 					})
 				}
 				msgs = append(msgs, msg)
+			} else {
+				logger.L().Warn("unmarshal tool call message failed", zap.Error(err))
 			}
-		case "tool":
+		case models.RoleTool:
 			var tr toolResultContent
 			if err := json.Unmarshal([]byte(m.Content), &tr); err == nil {
 				msgs = append(msgs, llm.MessageContent{
 					Role: llm.RoleTool, Content: tr.Result,
 					ToolCallID: tr.ToolCallID, ToolCallName: tr.Name,
 				})
+			} else {
+				logger.L().Warn("unmarshal tool result message failed", zap.Error(err))
 			}
 		}
 	}
@@ -462,9 +474,9 @@ func trimHistory(history []memory.Message, maxMessages int) []memory.Message {
 
 	start := len(history) - maxMessages
 
-	// Ensure we don't split a tool_call/tool pair — if the message at start
-	// is a "tool" response, back up to include its preceding assistant_tool_call.
-	for start > 0 && history[start].Role == "tool" {
+	// Ensure we don't split a function/tool pair — if the message at start
+	// is a "tool" response, back up to include its preceding function message.
+	for start > 0 && history[start].Role == models.RoleTool {
 		start--
 	}
 

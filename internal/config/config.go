@@ -18,6 +18,19 @@ type Config struct {
 	Memory MemoryConfig `mapstructure:"memory"`
 	Milvus Milvus       `mapstructure:"milvus"`
 	Agent  AgentConfig  `mapstructure:"agent"`
+	Log    LogConfig    `mapstructure:"log"`
+}
+
+// LogConfig is the logger configuration.
+type LogConfig struct {
+	Level      string `mapstructure:"level"`
+	Format     string `mapstructure:"format"`
+	Output     string `mapstructure:"output"`
+	Filename   string `mapstructure:"filename"`
+	MaxSize    int    `mapstructure:"max_size"`
+	MaxBackups int    `mapstructure:"max_backups"`
+	MaxAge     int    `mapstructure:"max_age"`
+	Compress   bool   `mapstructure:"compress"`
 }
 
 // ServerConfig is the HTTP server configuration.
@@ -177,6 +190,32 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Agent.MaxContextMessages == 0 {
 		c.Agent.MaxContextMessages = 50
+	}
+
+	if c.Log.Level == "" {
+		c.Log.Level = "info"
+	}
+	if c.Log.Format == "" {
+		if c.Server.Mode == "debug" {
+			c.Log.Format = "console"
+		} else {
+			c.Log.Format = "json"
+		}
+	}
+	if c.Log.Output == "" {
+		c.Log.Output = "stdout"
+	}
+	if c.Log.Filename == "" {
+		c.Log.Filename = "logs/app.log"
+	}
+	if c.Log.MaxSize == 0 {
+		c.Log.MaxSize = 100
+	}
+	if c.Log.MaxBackups == 0 {
+		c.Log.MaxBackups = 7
+	}
+	if c.Log.MaxAge == 0 {
+		c.Log.MaxAge = 30
 	}
 }
 

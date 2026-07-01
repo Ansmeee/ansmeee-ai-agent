@@ -4,9 +4,12 @@ import (
 	"net/http"
 	"strings"
 
+	"ansmeee-ai-agent/pkg/logger"
 	"ansmeee-ai-agent/pkg/response"
+
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"go.uber.org/zap"
 )
 
 const (
@@ -37,6 +40,7 @@ func JWTAuth(secret string) gin.HandlerFunc {
 			return secretBytes, nil
 		})
 		if err != nil || !token.Valid {
+			logger.L().Warn("JWT auth failed", zap.Error(err))
 			response.Fail(c, http.StatusUnauthorized, response.CodeUnauthorized, "invalid or expired token")
 			c.Abort()
 			return
@@ -44,6 +48,7 @@ func JWTAuth(secret string) gin.HandlerFunc {
 
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
+			logger.L().Warn("JWT claims type assertion failed")
 			response.Fail(c, http.StatusUnauthorized, response.CodeUnauthorized, "invalid token claims")
 			c.Abort()
 			return

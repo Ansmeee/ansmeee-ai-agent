@@ -100,7 +100,7 @@ func setupIntegrationTest(mockCalls []mockCall) (*gin.Engine, memory.SessionStor
 		c.Set(middleware.CtxUserEmail, "test@test.com")
 		c.Next()
 	})
-	r.POST("/api/v1/chat/stream", streamHandler.Handle)
+	r.POST("/api/v1/chat/completion", streamHandler.Handle)
 	r.GET("/api/v1/chat/:sessionId", chatHandler.History)
 
 	return r, store
@@ -131,7 +131,7 @@ type sseEvent struct {
 
 func doStreamRequest(r *gin.Engine, body string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/stream", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/completion", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 	return w
@@ -161,7 +161,7 @@ func TestIntegration_MathCalculation(t *testing.T) {
 
 	events := parseSSEEvents(w.Body.String())
 
-	// Verify: session → thinking → tool_start → tool_end → thinking → chunk(s) → done
+	// Verify: session → thinking → tool_call → thinking → chunk(s) → done
 	eventTypes := make([]string, len(events))
 	for i, e := range events {
 		eventTypes[i] = e.event
@@ -181,30 +181,21 @@ func TestIntegration_MathCalculation(t *testing.T) {
 		t.Errorf("session_id = %q, want s1", sessionData.SessionID)
 	}
 
-	// Must contain tool_start and tool_end
-	hasToolStart, hasToolEnd, hasDone := false, false, false
+	// Must contain tool_call and done
+	hasToolCall, hasDone := false, false
 	for _, e := range events {
 		switch e.event {
-		case "tool_start":
-			hasToolStart = true
-			var data sseToolStartData
+		case "tool_call":
+			hasToolCall = true
+			var data sseToolCallData
 			if err := json.Unmarshal([]byte(e.data), &data); err != nil {
-				t.Errorf("tool_start data not valid JSON: %v", err)
+				t.Errorf("tool_call data not valid JSON: %v", err)
 			}
 			if data.Name != "calculator" {
-				t.Errorf("tool_start name = %q, want calculator", data.Name)
-			}
-		case "tool_end":
-			hasToolEnd = true
-			var data sseToolEndData
-			if err := json.Unmarshal([]byte(e.data), &data); err != nil {
-				t.Errorf("tool_end data not valid JSON: %v", err)
-			}
-			if data.Name != "calculator" {
-				t.Errorf("tool_end name = %q, want calculator", data.Name)
+				t.Errorf("tool_call name = %q, want calculator", data.Name)
 			}
 			if !data.Success {
-				t.Error("tool_end should be successful")
+				t.Error("tool_call should be successful")
 			}
 		case "done":
 			hasDone = true
@@ -215,11 +206,8 @@ func TestIntegration_MathCalculation(t *testing.T) {
 		}
 	}
 
-	if !hasToolStart {
-		t.Error("missing tool_start event")
-	}
-	if !hasToolEnd {
-		t.Error("missing tool_end event")
+	if !hasToolCall {
+		t.Error("missing tool_call event")
 	}
 	if !hasDone {
 		t.Error("missing done event")
@@ -254,23 +242,18 @@ func TestIntegration_MultiRoundToolCalls(t *testing.T) {
 
 	events := parseSSEEvents(w.Body.String())
 
-	toolStarts, toolEnds, thinkings := 0, 0, 0
+	toolCalls, thinkings := 0, 0
 	for _, e := range events {
 		switch e.event {
-		case "tool_start":
-			toolStarts++
-		case "tool_end":
-			toolEnds++
+		case "tool_call":
+			toolCalls++
 		case "thinking":
 			thinkings++
 		}
 	}
 
-	if toolStarts != 2 {
-		t.Errorf("expected 2 tool_start events, got %d", toolStarts)
-	}
-	if toolEnds != 2 {
-		t.Errorf("expected 2 tool_end events, got %d", toolEnds)
+	if toolCalls != 2 {
+		t.Errorf("expected 2 tool_call events, got %d", toolCalls)
 	}
 	if thinkings < 2 {
 		t.Errorf("expected at least 2 thinking events (one per iteration), got %d", thinkings)
@@ -299,8 +282,8 @@ func TestIntegration_ToolNotFound(t *testing.T) {
 
 	hasFailedTool := false
 	for _, e := range events {
-		if e.event == "tool_end" {
-			var data sseToolEndData
+		if e.event == "tool_call" {
+			var data sseToolCallData
 			json.Unmarshal([]byte(e.data), &data)
 			if !data.Success && data.Name == "weather" {
 				hasFailedTool = true
@@ -308,7 +291,7 @@ func TestIntegration_ToolNotFound(t *testing.T) {
 		}
 	}
 	if !hasFailedTool {
-		t.Error("expected a failed tool_end when LLM calls a tool not in registry")
+		t.Error("expected a failed tool_call when LLM calls a tool not in registry")
 	}
 
 	// Should still get a done event (engine continues after tool failure)
@@ -370,17 +353,17 @@ func TestIntegration_HistoryReplay(t *testing.T) {
 
 	messages := resp.Data.Messages
 	if len(messages) < 4 {
-		t.Fatalf("expected at least 4 messages (user, tool_call, tool, assistant), got %d", len(messages))
+		t.Fatalf("expected at least 4 messages (human, function, tool, ai), got %d", len(messages))
 	}
 
-	// Check that role=tool and role=assistant_tool_call messages are present
+	// Check that role=tool and role=function messages are present
 	hasToolCall, hasToolResult := false, false
 	for _, m := range messages {
 		switch m.Role {
-		case "assistant_tool_call":
+		case "function":
 			hasToolCall = true
 			if !json.Valid([]byte(m.Content)) {
-				t.Errorf("assistant_tool_call content is not valid JSON: %s", m.Content)
+				t.Errorf("function content is not valid JSON: %s", m.Content)
 			}
 		case "tool":
 			hasToolResult = true
@@ -390,7 +373,7 @@ func TestIntegration_HistoryReplay(t *testing.T) {
 		}
 	}
 	if !hasToolCall {
-		t.Error("history missing assistant_tool_call message")
+		t.Error("history missing function message")
 	}
 	if !hasToolResult {
 		t.Error("history missing tool message")
@@ -428,7 +411,7 @@ func TestIntegration_DisabledAgent(t *testing.T) {
 		c.Set(middleware.CtxUserID, int64(1))
 		c.Next()
 	})
-	r.POST("/api/v1/chat/stream", func(c *gin.Context) {
+	r.POST("/api/v1/chat/completion", func(c *gin.Context) {
 		var req ChatRequest
 		if err := c.ShouldBindJSON(&req); err != nil || req.Message == "" {
 			c.JSON(400, gin.H{"code": 1001, "message": "bad request"})

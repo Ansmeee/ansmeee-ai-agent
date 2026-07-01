@@ -37,7 +37,7 @@
 ### 2.1 改造后的请求流
 
 ```
-POST /api/v1/chat/stream
+POST /api/v1/chat/completion
     │
     ▼
 StreamHandler.Handle()

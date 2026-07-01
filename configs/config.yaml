@@ -59,3 +59,13 @@ agent:
   max_output_length: 4096      # Max tool output chars (truncated if exceeded)
   parallel_tool_calls: true    # Allow parallel tool execution
   max_context_messages: 50     # Max history messages in context window
+
+log:
+  level: info         # debug | info | warn | error
+  format: json     # console for dev; json in prod
+  output: file      # stdout | file
+  filename: logs/app.log
+  max_size: 100       # MB before rotation
+  max_backups: 7      # rotated files to retain
+  max_age: 30         # days to retain rotated files
+  compress: false     # gzip rotated files

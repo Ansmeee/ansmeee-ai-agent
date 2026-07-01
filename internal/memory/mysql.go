@@ -6,6 +6,9 @@ import (
 	"time"
 
 	"ansmeee-ai-agent/internal/models"
+	"ansmeee-ai-agent/internal/tracing"
+	"ansmeee-ai-agent/pkg/logger"
+
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -25,48 +28,23 @@ func genMsgUUID() string {
 	return uuid.New().String()
 }
 
-func roleStringToInt(role string) int8 {
-	switch role {
-	case "assistant":
-		return models.RoleAssistant
-	case "tool":
-		return models.RoleTool
-	case "assistant_tool_call":
-		return models.RoleAssistantToolCall
-	default:
-		return models.RoleUser
-	}
-}
-
-func roleIntToString(role int8) string {
-	switch role {
-	case models.RoleAssistant:
-		return "assistant"
-	case models.RoleTool:
-		return "tool"
-	case models.RoleAssistantToolCall:
-		return "assistant_tool_call"
-	default:
-		return "user"
-	}
-}
-
 // AddMessage appends a message to a session.
 func (s *MySQLStore) AddMessage(ctx context.Context, sessionID string, msg Message, userID int64) error {
-	role := roleStringToInt(msg.Role)
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&models.ChatMessage{
 			SessionUUID: sessionID,
 			UserID:      userID,
 			UUID:        genMsgUUID(),
 			Content:     msg.Content,
-			Role:        role,
+			Role:        msg.Role,
 		}).Error; err != nil {
 			return err
 		}
-		if msg.Role == "user" {
-			tx.Model(&models.Session{}).Where("uuid = ? AND title = ''", sessionID).
-				Update("title", msg.Content)
+		if msg.Role == models.RoleHuman {
+			if err := tx.Model(&models.Session{}).Where("uuid = ? AND title = ''", sessionID).
+				Update("title", msg.Content).Error; err != nil {
+				logger.L().Warn("backfill session title failed", tracing.ErrFields(ctx, err)...)
+			}
 		}
 		return nil
 	})
@@ -86,7 +64,7 @@ func (s *MySQLStore) History(ctx context.Context, sessionID string) ([]Message, 
 	}
 	result := make([]Message, len(rows))
 	for i, r := range rows {
-		result[i] = Message{Role: roleIntToString(r.Role), Content: r.Content}
+		result[i] = Message{Role: r.Role, Content: r.Content}
 	}
 	return result, nil
 }

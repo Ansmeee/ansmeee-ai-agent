@@ -97,6 +97,11 @@ func ZapFields(ctx context.Context) []zap.Field {
 	}
 }
 
+// ErrFields returns trace fields plus the error, for use at log sites.
+func ErrFields(ctx context.Context, err error) []zap.Field {
+	return append(ZapFields(ctx), zap.Error(err))
+}
+
 // GenID generates a random hex ID of n bytes.
 func GenID(n int) string {
 	b := make([]byte, n)

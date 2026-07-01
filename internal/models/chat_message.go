@@ -2,12 +2,14 @@ package models
 
 import "time"
 
-// Message role constants.
+// Message role constants matching langchaingo's ChatMessageType values.
 const (
-	RoleUser              int8 = 1
-	RoleAssistant         int8 = 2
-	RoleTool              int8 = 3
-	RoleAssistantToolCall int8 = 4
+	RoleSystem   = "system"
+	RoleHuman    = "human"
+	RoleAI       = "ai"
+	RoleGeneric  = "generic"
+	RoleFunction = "function"
+	RoleTool     = "tool"
 )
 
 // ChatMessage represents the ai_chat_session_history table.
@@ -17,7 +19,7 @@ type ChatMessage struct {
 	UserID      int64     `json:"user_id" gorm:"column:user_id;not null;default:0;index"`
 	UUID        string    `json:"id" gorm:"column:uuid;type:char(36);uniqueIndex;not null;default:''"`
 	Content     string    `json:"content" gorm:"column:content;type:text"`
-	Role        int8      `json:"role" gorm:"column:role;type:tinyint;not null;default:0"`
+	Role        string    `json:"role" gorm:"column:role;type:varchar(20);not null;default:'human'"`
 	CreatedAt   time.Time `json:"created_at" gorm:"column:ctime;autoCreateTime"`
 	UpdatedAt   time.Time `json:"updated_at" gorm:"column:mtime;autoUpdateTime"`
 }

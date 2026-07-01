@@ -4,7 +4,10 @@ import (
 	"ansmeee-ai-agent/internal/llm"
 	"ansmeee-ai-agent/internal/middleware"
 	"ansmeee-ai-agent/internal/models"
+	"ansmeee-ai-agent/internal/tracing"
+	"ansmeee-ai-agent/pkg/logger"
 	"ansmeee-ai-agent/pkg/response"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -20,9 +23,11 @@ func NewModelConfigHandler(store *llm.ModelConfigStore) *ModelConfigHandler {
 
 // Get returns the model configs for the current user.
 func (h *ModelConfigHandler) Get(c *gin.Context) {
+	ctx := c.Request.Context()
 	userID := c.GetInt64(middleware.CtxUserID)
-	cfgs, err := h.store.GetByUser(userID)
+	cfgs, err := h.store.GetByUser(ctx, userID)
 	if err != nil {
+		logger.L().Error("get model configs failed", tracing.ErrFields(ctx, err)...)
 		response.InternalError(c, err.Error())
 		return
 	}
@@ -60,6 +65,7 @@ type modelConfigRequest struct {
 
 // Save upserts the model config for the current user.
 func (h *ModelConfigHandler) Save(c *gin.Context) {
+	ctx := c.Request.Context()
 	var req modelConfigRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "invalid request body")
@@ -75,8 +81,9 @@ func (h *ModelConfigHandler) Save(c *gin.Context) {
 	}
 
 	userID := c.GetInt64(middleware.CtxUserID)
-	cfg, err := h.store.Save(userID, req.ModelType, req.Model, req.BaseURL, req.Token)
+	cfg, err := h.store.Save(ctx, userID, req.ModelType, req.Model, req.BaseURL, req.Token)
 	if err != nil {
+		logger.L().Error("save model config failed", tracing.ErrFields(ctx, err)...)
 		response.InternalError(c, err.Error())
 		return
 	}

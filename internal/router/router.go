@@ -50,7 +50,7 @@ func Setup(cfg *config.Config, logger *zap.Logger, mem memory.SessionStore, engi
 	v1.Use(middleware.JWTAuth(cfg.Server.JWTSecret))
 	{
 		v1.GET("/auth/me", authHandler.Me)
-		v1.POST("/chat/stream", streamHandler.Handle)
+		v1.POST("/chat/completion", streamHandler.Handle)
 		v1.GET("/chat/:sessionId", chatHandler.History)
 		v1.DELETE("/chat/:sessionId", chatHandler.Delete)
 		v1.POST("/sessions", chatHandler.CreateSession)

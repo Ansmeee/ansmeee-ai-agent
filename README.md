@@ -70,7 +70,7 @@ ansmeee-ai-agent/
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | /api/v1/chat | 非流式对话，返回完整响应 |
-| POST | /api/v1/chat/stream | 流式对话，SSE 推送 |
+| POST | /api/v1/chat/completion | 流式对话，SSE 推送 |
 | GET | /api/v1/chat/:sessionId | 获取会话历史消息 |
 | DELETE | /api/v1/chat/:sessionId | 删除并清理会话 |
 | GET | /api/v1/tools | 获取可用工具列表及描述 |
