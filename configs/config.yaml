@@ -53,6 +53,46 @@ memory:
   ttl: 30m
   max_messages: 100
 
+  # L1 task state machine (per-session working memory).
+  task:
+    backend: memory   # memory | redis (redis is Phase 2)
+    idle_ttl: 5m      # session idle window before the summary scan triggers
+
+  # L2 long-term memory. Set enabled=false to fully disable and match mainline behavior.
+  longterm:
+    enabled: true
+    router: true          # deterministic query router gating fact recall
+    budget_ratio: 0.2     # fraction of the base prompt spent on enrichment
+    extraction_model: ""  # override model for the Phase 2 LLM summarizer
+    fact:
+      enabled: true
+      top_k: 5
+      min_score: 0.5
+    policy:               # Phase 2
+      enabled: true
+      top_k: 5
+      min_score: 0.5
+    vector:               # Phase 3 (Milvus)
+      enabled: false
+      embedding_dim: 1536
+      top_k: 5
+      min_similarity: 0.7
+    scoring:              # recall weight = confidence*0.3 + freshness*0.2 + relevance*0.5
+      confidence: 0.3
+      freshness: 0.2
+      relevance: 0.5
+    admission:
+      write_threshold: 0.6
+      max_entries_per_user: 1000
+      max_extractions_per_session: 1
+
+  # L2 evolution jobs (decay / cleanup).
+  evolution:
+    enabled: true
+    decay_factor: 0.95
+    idle_scan_cron: "*/1 * * * *"
+    cleanup_cron: "0 3 * * *"
+
 agent:
   max_iterations: 5            # Max ReAct loop iterations per request (1-10)
   tool_timeout: 30s            # Single tool execution timeout

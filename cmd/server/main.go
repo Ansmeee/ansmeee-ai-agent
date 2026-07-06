@@ -90,6 +90,27 @@ func main() {
 	reg.Register(&tool.Weather{})
 	logger.Info("tools registered", zap.Int("count", len(reg.List())))
 
+	// Initialize memory manager (L1 task state + L2 long-term fact memory).
+	memoryCtx, memoryCancel := context.WithCancel(context.Background())
+	defer memoryCancel()
+	var memMgr *memory.MemoryManager
+	if cfg.Memory.LongTerm.Enabled {
+		factStore, ferr := memory.NewFactStore(gormDB, cfg.Memory.LongTerm.Scoring, cfg.Memory.Evolution.DecayFactor)
+		if ferr != nil {
+			logger.Warn("fact store init failed, long-term memory disabled", zap.Error(ferr))
+		} else {
+			// Phase 1: in-memory task backend (redis backend deferred to Phase 2).
+			taskStore := memory.NewTaskStore(&cfg.Memory, nil)
+			memMgr = memory.NewMemoryManager(
+				sessionStore, taskStore, factStore,
+				memory.NewQueryRouter(), memory.NewDeterministicExtractor(),
+				cfg.Memory.LongTerm,
+			)
+			go memory.NewIdleScanner(gormDB, memMgr, &cfg.Memory).Start(memoryCtx)
+			logger.Info("memory manager initialized (fact + task, Phase 1)")
+		}
+	}
+
 	// Initialize agent engine.
 	cb := agent.NewCallback(appLogger)
 	engine := agent.New(llmProvider, reg, sessionStore, cb,
@@ -98,6 +119,7 @@ func main() {
 		agent.WithMaxOutputLength(cfg.Agent.MaxOutputLength),
 		agent.WithParallelToolCalls(cfg.Agent.ParallelToolCalls),
 		agent.WithMaxContextMessages(cfg.Agent.MaxContextMessages),
+		agent.WithMemoryManager(memMgr),
 	)
 	logger.Info("agent engine initialized")
 

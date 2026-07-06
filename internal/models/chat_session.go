@@ -11,6 +11,9 @@ type Session struct {
 	AgentUUID string    `json:"agent_id" gorm:"column:agent_uuid;type:char(36);not null;default:''"`
 	CreatedAt time.Time `json:"created_at" gorm:"column:ctime;autoCreateTime"`
 	UpdatedAt time.Time `json:"updated_at" gorm:"column:mtime;autoUpdateTime"`
+	// L2 memory: idle-scan scheduling for the backend-agnostic summary trigger.
+	LastActiveAt *time.Time `json:"-" gorm:"column:last_active_at"`
+	Summarized   bool       `json:"-" gorm:"column:summarized;not null;default:0"`
 }
 
 // TableName overrides the default table name.

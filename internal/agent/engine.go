@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +38,7 @@ type Engine struct {
 	maxOutputLength    int
 	parallelToolCalls  bool
 	maxContextMessages int
+	memMgr             *memory.MemoryManager
 }
 
 // EngineOption configures the engine.
@@ -64,6 +66,12 @@ func WithParallelToolCalls(b bool) EngineOption {
 
 func WithMaxContextMessages(n int) EngineOption {
 	return func(e *Engine) { e.maxContextMessages = n }
+}
+
+// WithMemoryManager attaches the L1/L2 memory orchestrator. When nil, all memory
+// logic is short-circuited and behavior is identical to the base engine.
+func WithMemoryManager(mm *memory.MemoryManager) EngineOption {
+	return func(e *Engine) { e.memMgr = mm }
 }
 
 // New creates a new Agent engine.
@@ -133,6 +141,13 @@ func (e *Engine) ProcessStream(ctx context.Context, sessionID, userMessage strin
 			maxIter = agentCfg.MaxIterations
 		}
 
+		var task *memory.TaskState
+		var turnDelta []memory.Message
+		if e.memMgr != nil {
+			task = e.memMgr.Load(ctx, sessionID)
+		}
+		turnDelta = append(turnDelta, memory.Message{Role: models.RoleHuman, Content: userMessage})
+
 		if err := e.mem.AddMessage(ctx, sessionID, memory.Message{Role: models.RoleHuman, Content: userMessage}, userID); err != nil {
 			logger.L().Error("save user message failed", tracing.ErrFields(ctx, err)...)
 			ch <- StreamEvent{Type: "error", Error: fmt.Errorf("save user message: %w", err)}
@@ -142,6 +157,15 @@ func (e *Engine) ProcessStream(ctx context.Context, sessionID, userMessage strin
 		history, err := e.mem.History(ctx, sessionID)
 		if err != nil {
 			logger.L().Warn("load history failed, starting fresh", tracing.ErrFields(ctx, err)...)
+		}
+
+		const memAgentID = "" // MVP: user-level memory (design §5.2 F1)
+		if e.memMgr != nil {
+			enrich := e.memMgr.Retrieve(ctx, userID, memAgentID, sessionID, userMessage, task)
+			prompt = appendEnrichment(prompt, enrich)
+			if task != nil {
+				memory.UpdateTaskState(task, memory.UserMessageEvent(userMessage))
+			}
 		}
 		messages := e.buildMessages(prompt, history)
 
@@ -178,6 +202,7 @@ func (e *Engine) ProcessStream(ctx context.Context, sessionID, userMessage strin
 					Role: models.RoleAI, Content: result.Content,
 				}, userID)
 				e.callback.OnLLMEnd(ctx, sessionID, 0, 0)
+				e.finalizeTask(ctx, task, turnDelta, sessionID, userID, result.Content)
 				ch <- StreamEvent{Type: "done", Content: sessionID}
 				return
 			}
@@ -189,13 +214,31 @@ func (e *Engine) ProcessStream(ctx context.Context, sessionID, userMessage strin
 			e.saveMessage(ctx, sessionID, toolCallMsg, userID)
 			messages = append(messages, toolCallToLLMMessage(result))
 
+			if e.memMgr != nil && task != nil {
+				for _, tc := range result.ToolCalls {
+					name := ""
+					if tc.FunctionCall != nil {
+						name = tc.FunctionCall.Name
+					}
+					memory.UpdateTaskState(task, memory.ToolCallEvent(name))
+				}
+				turnDelta = append(turnDelta, toolCallMsg)
+			}
+
+			var toolMsgs []llm.MessageContent
 			if parallelToolCalls && len(result.ToolCalls) > 1 {
-				toolMsgs := e.executeToolsConcurrently(ctx, ch, result.ToolCalls, sessionID, userID)
-				messages = append(messages, toolMsgs...)
+				toolMsgs = e.executeToolsConcurrently(ctx, ch, result.ToolCalls, sessionID, userID)
 			} else {
 				for _, tc := range result.ToolCalls {
-					toolMsg := e.executeAndEmitTool(ctx, ch, tc, sessionID, userID)
-					messages = append(messages, toolMsg)
+					toolMsgs = append(toolMsgs, e.executeAndEmitTool(ctx, ch, tc, sessionID, userID))
+				}
+			}
+			messages = append(messages, toolMsgs...)
+
+			if e.memMgr != nil && task != nil {
+				for _, tm := range toolMsgs {
+					success := !strings.HasPrefix(tm.Content, "Error:")
+					memory.UpdateTaskState(task, memory.ToolResultEvent(tm.ToolCallName, truncateSummary(tm.Content), success))
 				}
 			}
 			e.callback.OnLLMEnd(ctx, sessionID, 0, 0)
@@ -219,6 +262,7 @@ func (e *Engine) ProcessStream(ctx context.Context, sessionID, userMessage strin
 			Role: models.RoleAI, Content: result.Content,
 		}, userID)
 		e.callback.OnLLMEnd(ctx, sessionID, 0, 0)
+		e.finalizeTask(ctx, task, turnDelta, sessionID, userID, result.Content)
 		ch <- StreamEvent{Type: "done", Content: sessionID}
 	}()
 
@@ -235,6 +279,36 @@ func (e *Engine) saveMessage(ctx context.Context, sessionID string, msg memory.M
 			)...,
 		)
 	}
+}
+
+// finalizeTask applies the terminal transition, persists task state, and starts
+// the deterministic (zero-LLM) extraction over the accumulated turn delta.
+func (e *Engine) finalizeTask(ctx context.Context, task *memory.TaskState, turnDelta []memory.Message, sessionID string, userID int64, finalContent string) {
+	if e.memMgr == nil || task == nil {
+		return
+	}
+	memory.UpdateTaskState(task, memory.FinalReplyEvent(finalContent))
+	turnDelta = append(turnDelta, memory.Message{Role: models.RoleAI, Content: finalContent})
+	e.memMgr.Save(ctx, sessionID, task)
+	go e.memMgr.OnTurnEnd(context.WithoutCancel(ctx), userID, sessionID, turnDelta)
+}
+
+// appendEnrichment appends the memory enrichment segment below the base prompt.
+func appendEnrichment(prompt, enrich string) string {
+	if enrich == "" {
+		return prompt
+	}
+	return prompt + "\n\n" + enrich
+}
+
+// truncateSummary bounds a tool-result summary stored into TaskState slots.
+func truncateSummary(s string) string {
+	const maxRunes = 200
+	r := []rune(s)
+	if len(r) > maxRunes {
+		return string(r[:maxRunes])
+	}
+	return s
 }
 
 func (e *Engine) resolveTools(agentCfg *AgentConfig) []tools.Tool {

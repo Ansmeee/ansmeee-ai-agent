@@ -40,6 +40,16 @@ func (s *MySQLStore) AddMessage(ctx context.Context, sessionID string, msg Messa
 		}).Error; err != nil {
 			return err
 		}
+		// Bump idle-scan activity marker on every message; a new human turn
+		// reopens the session for summarization (summarized reset to false).
+		sessionUpdates := map[string]any{"last_active_at": time.Now()}
+		if msg.Role == models.RoleHuman {
+			sessionUpdates["summarized"] = false
+		}
+		if err := tx.Model(&models.Session{}).Where("uuid = ?", sessionID).
+			Updates(sessionUpdates).Error; err != nil {
+			logger.L().Warn("update session activity failed", tracing.ErrFields(ctx, err)...)
+		}
 		if msg.Role == models.RoleHuman {
 			if err := tx.Model(&models.Session{}).Where("uuid = ? AND title = ''", sessionID).
 				Update("title", msg.Content).Error; err != nil {
@@ -64,7 +74,7 @@ func (s *MySQLStore) History(ctx context.Context, sessionID string) ([]Message, 
 	}
 	result := make([]Message, len(rows))
 	for i, r := range rows {
-		result[i] = Message{Role: r.Role, Content: r.Content}
+		result[i] = Message{Role: r.Role, Content: r.Content, ID: r.UUID, Ts: r.CreatedAt}
 	}
 	return result, nil
 }

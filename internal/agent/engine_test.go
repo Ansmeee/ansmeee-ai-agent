@@ -361,12 +361,27 @@ func (te *testableEngine) processStream(ctx context.Context, sessionID, msg stri
 			maxIter = agentCfg.MaxIterations
 		}
 
+		var task *memory.TaskState
+		var turnDelta []memory.Message
+		if te.memMgr != nil {
+			task = te.memMgr.Load(ctx, sessionID)
+		}
+		turnDelta = append(turnDelta, memory.Message{Role: models.RoleHuman, Content: msg})
+
 		if err := te.mem.AddMessage(ctx, sessionID, memory.Message{Role: models.RoleHuman, Content: msg}, userID); err != nil {
 			ch <- StreamEvent{Type: "error", Error: err}
 			return
 		}
 
 		history, _ := te.mem.History(ctx, sessionID)
+		const memAgentID = ""
+		if te.memMgr != nil {
+			enrich := te.memMgr.Retrieve(ctx, userID, memAgentID, sessionID, msg, task)
+			prompt = appendEnrichment(prompt, enrich)
+			if task != nil {
+				memory.UpdateTaskState(task, memory.UserMessageEvent(msg))
+			}
+		}
 		messages := te.buildMessages(prompt, history)
 		filteredTools := te.resolveTools(agentCfg)
 
@@ -393,6 +408,7 @@ func (te *testableEngine) processStream(ctx context.Context, sessionID, msg stri
 					Role: models.RoleAI, Content: result.Content,
 				}, userID)
 				te.callback.OnLLMEnd(ctx, sessionID, 0, 0)
+				te.finalizeTask(ctx, task, turnDelta, sessionID, userID, result.Content)
 				ch <- StreamEvent{Type: "done", Content: sessionID}
 				return
 			}
@@ -404,13 +420,31 @@ func (te *testableEngine) processStream(ctx context.Context, sessionID, msg stri
 			te.mem.AddMessage(ctx, sessionID, toolCallMsg, userID)
 			messages = append(messages, toolCallToLLMMessage(result))
 
+			if te.memMgr != nil && task != nil {
+				for _, tc := range result.ToolCalls {
+					name := ""
+					if tc.FunctionCall != nil {
+						name = tc.FunctionCall.Name
+					}
+					memory.UpdateTaskState(task, memory.ToolCallEvent(name))
+				}
+				turnDelta = append(turnDelta, toolCallMsg)
+			}
+
+			var toolMsgs []llm.MessageContent
 			if parallelToolCalls && len(result.ToolCalls) > 1 {
-				toolMsgs := te.executeToolsConcurrently(ctx, ch, result.ToolCalls, sessionID, userID)
-				messages = append(messages, toolMsgs...)
+				toolMsgs = te.executeToolsConcurrently(ctx, ch, result.ToolCalls, sessionID, userID)
 			} else {
 				for _, tc := range result.ToolCalls {
-					toolMsg := te.executeAndEmitTool(ctx, ch, tc, sessionID, userID)
-					messages = append(messages, toolMsg)
+					toolMsgs = append(toolMsgs, te.executeAndEmitTool(ctx, ch, tc, sessionID, userID))
+				}
+			}
+			messages = append(messages, toolMsgs...)
+
+			if te.memMgr != nil && task != nil {
+				for _, tm := range toolMsgs {
+					success := !strings.HasPrefix(tm.Content, "Error:")
+					memory.UpdateTaskState(task, memory.ToolResultEvent(tm.ToolCallName, truncateSummary(tm.Content), success))
 				}
 			}
 			te.callback.OnLLMEnd(ctx, sessionID, 0, 0)
@@ -429,6 +463,7 @@ func (te *testableEngine) processStream(ctx context.Context, sessionID, msg stri
 			Role: "assistant", Content: result.Content,
 		}, userID)
 		te.callback.OnLLMEnd(ctx, sessionID, 0, 0)
+		te.finalizeTask(ctx, task, turnDelta, sessionID, userID, result.Content)
 		ch <- StreamEvent{Type: "done", Content: sessionID}
 	}()
 

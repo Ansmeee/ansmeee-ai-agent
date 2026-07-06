@@ -96,9 +96,68 @@ type RedisConfig struct {
 
 // MemoryConfig is the memory backend configuration.
 type MemoryConfig struct {
-	Type        string        `mapstructure:"type"`
-	TTL         time.Duration `mapstructure:"ttl"`
-	MaxMessages int           `mapstructure:"max_messages"`
+	Type        string          `mapstructure:"type"`
+	TTL         time.Duration   `mapstructure:"ttl"`
+	MaxMessages int             `mapstructure:"max_messages"`
+	Task        TaskMemConfig   `mapstructure:"task"`      // L1 task state machine
+	LongTerm    LongTermConfig  `mapstructure:"longterm"`  // L2 long-term memory
+	Evolution   EvolutionConfig `mapstructure:"evolution"` // L2 evolution jobs
+}
+
+// TaskMemConfig configures the L1 task-state store.
+type TaskMemConfig struct {
+	Backend string        `mapstructure:"backend"` // memory | redis
+	IdleTTL time.Duration `mapstructure:"idle_ttl"`
+}
+
+// LongTermConfig configures the L2 long-term memory channels.
+type LongTermConfig struct {
+	Enabled         bool            `mapstructure:"enabled"`
+	Router          bool            `mapstructure:"router"`
+	Fact            ChannelConfig   `mapstructure:"fact"`
+	Policy          ChannelConfig   `mapstructure:"policy"`
+	Vector          VectorConfig    `mapstructure:"vector"`
+	Scoring         ScoreWeights    `mapstructure:"scoring"`
+	BudgetRatio     float64         `mapstructure:"budget_ratio"`
+	Admission       AdmissionConfig `mapstructure:"admission"`
+	ExtractionModel string          `mapstructure:"extraction_model"`
+}
+
+// ChannelConfig configures a structured L2 channel (fact / policy).
+type ChannelConfig struct {
+	Enabled  bool    `mapstructure:"enabled"`
+	TopK     int     `mapstructure:"top_k"`
+	MinScore float64 `mapstructure:"min_score"`
+}
+
+// VectorConfig configures the optional L2 vector channel.
+type VectorConfig struct {
+	Enabled       bool    `mapstructure:"enabled"`
+	EmbeddingDim  int     `mapstructure:"embedding_dim"`
+	TopK          int     `mapstructure:"top_k"`
+	MinSimilarity float64 `mapstructure:"min_similarity"`
+}
+
+// ScoreWeights are the L2 recall scoring weights.
+type ScoreWeights struct {
+	Confidence float64 `mapstructure:"confidence"`
+	Freshness  float64 `mapstructure:"freshness"`
+	Relevance  float64 `mapstructure:"relevance"`
+}
+
+// AdmissionConfig is the L2 write admission control.
+type AdmissionConfig struct {
+	WriteThreshold           float64 `mapstructure:"write_threshold"`
+	MaxEntriesPerUser        int     `mapstructure:"max_entries_per_user"`
+	MaxExtractionsPerSession int     `mapstructure:"max_extractions_per_session"`
+}
+
+// EvolutionConfig configures the L2 evolution jobs.
+type EvolutionConfig struct {
+	Enabled      bool    `mapstructure:"enabled"`
+	DecayFactor  float64 `mapstructure:"decay_factor"`
+	IdleScanCron string  `mapstructure:"idle_scan_cron"`
+	CleanupCron  string  `mapstructure:"cleanup_cron"`
 }
 
 // AgentConfig is the Agent engine configuration.
@@ -127,6 +186,13 @@ func Load(path string) (*Config, error) {
 	v.AutomaticEnv()
 
 	v.SetDefault("agent.parallel_tool_calls", true)
+
+	// L2 long-term memory toggles default to true; explicit YAML false is respected.
+	v.SetDefault("memory.longterm.enabled", true)
+	v.SetDefault("memory.longterm.router", true)
+	v.SetDefault("memory.longterm.fact.enabled", true)
+	v.SetDefault("memory.longterm.policy.enabled", true)
+	v.SetDefault("memory.evolution.enabled", true)
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
@@ -178,6 +244,7 @@ func (c *Config) applyDefaults() {
 	if c.Memory.MaxMessages == 0 {
 		c.Memory.MaxMessages = 100
 	}
+	applyMemoryDefaults(&c.Memory)
 
 	if c.Agent.MaxIterations == 0 {
 		c.Agent.MaxIterations = 5
@@ -216,6 +283,64 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Log.MaxAge == 0 {
 		c.Log.MaxAge = 30
+	}
+}
+
+func applyMemoryDefaults(m *MemoryConfig) {
+	if m.Task.Backend == "" {
+		m.Task.Backend = "memory"
+	}
+	if m.Task.IdleTTL == 0 {
+		m.Task.IdleTTL = 5 * time.Minute
+	}
+
+	lt := &m.LongTerm
+	if lt.BudgetRatio == 0 {
+		lt.BudgetRatio = 0.2
+	}
+	if lt.Fact.TopK == 0 {
+		lt.Fact.TopK = 5
+	}
+	if lt.Fact.MinScore == 0 {
+		lt.Fact.MinScore = 0.5
+	}
+	if lt.Scoring.Confidence == 0 {
+		lt.Scoring.Confidence = 0.3
+	}
+	if lt.Scoring.Freshness == 0 {
+		lt.Scoring.Freshness = 0.2
+	}
+	if lt.Scoring.Relevance == 0 {
+		lt.Scoring.Relevance = 0.5
+	}
+	if lt.Admission.WriteThreshold == 0 {
+		lt.Admission.WriteThreshold = 0.6
+	}
+	if lt.Admission.MaxEntriesPerUser == 0 {
+		lt.Admission.MaxEntriesPerUser = 1000
+	}
+	if lt.Admission.MaxExtractionsPerSession == 0 {
+		lt.Admission.MaxExtractionsPerSession = 1
+	}
+	if lt.Vector.EmbeddingDim == 0 {
+		lt.Vector.EmbeddingDim = 1536
+	}
+	if lt.Vector.TopK == 0 {
+		lt.Vector.TopK = 5
+	}
+	if lt.Vector.MinSimilarity == 0 {
+		lt.Vector.MinSimilarity = 0.7
+	}
+
+	ev := &m.Evolution
+	if ev.DecayFactor == 0 {
+		ev.DecayFactor = 0.95
+	}
+	if ev.IdleScanCron == "" {
+		ev.IdleScanCron = "*/1 * * * *"
+	}
+	if ev.CleanupCron == "" {
+		ev.CleanupCron = "0 3 * * *"
 	}
 }
 

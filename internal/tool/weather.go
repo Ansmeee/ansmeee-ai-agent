@@ -26,5 +26,5 @@ func (w Weather) Parameters() map[string]any {
 }
 
 func (w Weather) Call(ctx context.Context, input string) (string, error) {
-	return "today is a good day", nil
+	return "天晴朗，27-35度，湿度50%", nil
 }

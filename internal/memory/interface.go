@@ -2,12 +2,16 @@ package memory
 
 import (
 	"context"
+	"time"
 )
 
 // Message represents a single chat message stored in memory.
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string            `json:"role"`
+	Content string            `json:"content"`
+	ID      string            `json:"id,omitempty"`   // message-level id, for evidence references
+	Ts      time.Time         `json:"ts,omitzero"`    // creation timestamp
+	Meta    map[string]string `json:"meta,omitempty"` // extension markers
 }
 
 // SessionInfo is a summary of a session.
