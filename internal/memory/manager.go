@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -18,28 +19,65 @@ const factTimeout = 200 * time.Millisecond
 const budgetBaseChars = 8000
 
 // MemoryManager orchestrates the L1/L2 memory channels behind a single facade.
-// Phase 1 wires the fact channel and the task store only; policy/vector/summarizer
-// are nil and their code paths are skipped.
+// The fact channel and task store are always wired; the vector store, embedder,
+// and summarizer are optional and their code paths are skipped when nil.
 type MemoryManager struct {
-	chat    SessionStore
-	task    TaskStore
-	fact    FactStore
-	router  *QueryRouter
-	extract *DeterministicExtractor
-	cfg     config.LongTermConfig
-	llog    *zap.Logger
+	chat       SessionStore
+	task       TaskStore
+	fact       FactStore
+	router     *QueryRouter
+	extract    Extractor
+	vec        VectorStore
+	embed      Embedder
+	summarizer *Summarizer
+	summaries  SummaryStore
+	cfg        config.LongTermConfig
+	llog       *zap.Logger
 }
 
-// NewMemoryManager builds the Phase 1 (fact-only) orchestrator.
+// SummaryStore persists idle-session summaries and marks sessions summarized.
+// gormFactStore implements it; kept separate from FactStore so existing fakes
+// need not change.
+type SummaryStore interface {
+	SaveSummary(ctx context.Context, s SessionSummary) error
+	MarkSessionSummarized(ctx context.Context, sessionID string) error
+}
+
+// ManagerOption configures optional MemoryManager dependencies.
+type ManagerOption func(*MemoryManager)
+
+// WithVectorStore attaches the semantic vector channel.
+func WithVectorStore(vec VectorStore) ManagerOption {
+	return func(m *MemoryManager) { m.vec = vec }
+}
+
+// WithEmbedder attaches the embedder used for the vector channel.
+func WithEmbedder(e Embedder) ManagerOption {
+	return func(m *MemoryManager) { m.embed = e }
+}
+
+// WithSummarizer attaches the idle-session LLM summarizer.
+func WithSummarizer(s *Summarizer) ManagerOption {
+	return func(m *MemoryManager) { m.summarizer = s }
+}
+
+// WithSummaryStore attaches the persistence backend for idle-session summaries.
+func WithSummaryStore(s SummaryStore) ManagerOption {
+	return func(m *MemoryManager) { m.summaries = s }
+}
+
+// NewMemoryManager builds the L1/L2 orchestrator. The fact channel and task store
+// are required positionally; optional channels are supplied via ManagerOptions.
 func NewMemoryManager(
 	chat SessionStore,
 	task TaskStore,
 	fact FactStore,
 	router *QueryRouter,
-	extract *DeterministicExtractor,
+	extract Extractor,
 	cfg config.LongTermConfig,
+	opts ...ManagerOption,
 ) *MemoryManager {
-	return &MemoryManager{
+	m := &MemoryManager{
 		chat:    chat,
 		task:    task,
 		fact:    fact,
@@ -48,6 +86,10 @@ func NewMemoryManager(
 		cfg:     cfg,
 		llog:    logger.L(),
 	}
+	for _, o := range opts {
+		o(m)
+	}
+	return m
 }
 
 // Load forwards to the task store (engine holds only the manager). Returns nil
@@ -80,6 +122,9 @@ func (m *MemoryManager) Retrieve(ctx context.Context, userID int64, agentID, ses
 
 	if facts := m.retrieveFacts(ctx, userID, agentID, userMsg); facts != "" {
 		sections = append(sections, facts)
+	}
+	if sem := m.retrieveSemantic(ctx, userID, userMsg); sem != "" {
+		sections = append(sections, sem)
 	}
 	if task := renderTaskState(ts); task != "" {
 		sections = append(sections, task)
@@ -164,6 +209,10 @@ func (m *MemoryManager) OnTurnEnd(ctx context.Context, userID int64, sessionID s
 
 	for _, e := range m.extract.Extract(sessionID, delta) {
 		e.UserID = userID // AgentID stays "" → user-level memory (MVP)
+		if e.Kind == KindEpisodic {
+			m.admitEpisodic(ctx, e)
+			continue
+		}
 		if _, err := m.fact.Admit(ctx, e, m.cfg.Admission); err != nil {
 			m.llog.Warn("fact admit failed",
 				zap.String("key", e.KeyName), zap.Error(err))
@@ -171,12 +220,99 @@ func (m *MemoryManager) OnTurnEnd(ctx context.Context, userID int64, sessionID s
 	}
 }
 
-// OnIdle is the silent LLM-summary path. Phase 1 stub (no LLM).
-func (m *MemoryManager) OnIdle(ctx context.Context, userID int64, sessionID string) {
-	if m == nil {
+// admitEpisodic stores an episodic entry in the semantic vector channel instead
+// of the structured fact table. No-op when the vector channel is not configured.
+func (m *MemoryManager) admitEpisodic(ctx context.Context, e MemoryEntry) {
+	if m.vec == nil || m.embed == nil || !m.cfg.Vector.Enabled {
 		return
 	}
-	m.llog.Debug("OnIdle noop (Phase 1)", zap.String("session_id", sessionID))
+	emb, err := m.embed.Embed(ctx, e.Value)
+	if err != nil {
+		m.llog.Warn("episodic embed failed", zap.Error(err))
+		return
+	}
+	if err := m.vec.Upsert(ctx, VectorItem{
+		UserID:    e.UserID,
+		Kind:      KindEpisodic,
+		Text:      e.Value,
+		Embedding: emb,
+		CreatedAt: time.Now(),
+	}); err != nil {
+		m.llog.Warn("episodic upsert failed", zap.Error(err))
+	}
+}
+
+// OnIdle summarizes an idle session (one LLM call), persists the summary, embeds
+// it into the semantic channel as episodic memory, and marks the session done.
+// Returns true only when the session was summarized and marked, so the caller can
+// avoid re-marking. No-op (returns false) when the summary path is not configured.
+func (m *MemoryManager) OnIdle(ctx context.Context, userID int64, sessionID string) bool {
+	if m == nil || m.summarizer == nil || m.chat == nil || !m.cfg.Enabled {
+		return false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			m.llog.Error("OnIdle panic recovered", zap.Any("recover", r))
+		}
+	}()
+
+	history, err := m.chat.History(ctx, sessionID)
+	if err != nil || len(history) == 0 {
+		return false
+	}
+
+	res, err := m.summarizer.Summarize(ctx, history)
+	if err != nil {
+		m.llog.Warn("session summarize failed", zap.String("session_id", sessionID), zap.Error(err))
+		return false
+	}
+	if strings.TrimSpace(res.Summary) == "" {
+		return false
+	}
+
+	if m.summaries != nil {
+		topics, _ := json.Marshal(res.Topics)
+		if err := m.summaries.SaveSummary(ctx, SessionSummary{
+			SessionID: sessionID,
+			UserID:    userID,
+			Summary:   res.Summary,
+			Topics:    string(topics),
+			CreatedAt: time.Now(),
+		}); err != nil {
+			m.llog.Warn("save summary failed", zap.String("session_id", sessionID), zap.Error(err))
+		}
+	}
+
+	m.embedSummary(ctx, userID, res.Summary)
+
+	if m.summaries != nil {
+		if err := m.summaries.MarkSessionSummarized(ctx, sessionID); err != nil {
+			m.llog.Warn("mark summarized failed", zap.String("session_id", sessionID), zap.Error(err))
+			return false
+		}
+	}
+	return true
+}
+
+// embedSummary stores a session summary in the semantic channel as episodic memory.
+func (m *MemoryManager) embedSummary(ctx context.Context, userID int64, summary string) {
+	if m.vec == nil || m.embed == nil || !m.cfg.Vector.Enabled {
+		return
+	}
+	emb, err := m.embed.Embed(ctx, summary)
+	if err != nil {
+		m.llog.Warn("summary embed failed", zap.Error(err))
+		return
+	}
+	if err := m.vec.Upsert(ctx, VectorItem{
+		UserID:    userID,
+		Kind:      KindEpisodic,
+		Text:      summary,
+		Embedding: emb,
+		CreatedAt: time.Now(),
+	}); err != nil {
+		m.llog.Warn("summary upsert failed", zap.Error(err))
+	}
 }
 
 // truncateToBudget keeps a prefix of lines whose cumulative length fits maxChars.

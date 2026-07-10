@@ -47,6 +47,28 @@ func TestExtractor_Human(t *testing.T) {
 	}
 }
 
+func TestExtractor_InterrogativesNotCaptured(t *testing.T) {
+	x := NewDeterministicExtractor()
+	// Recall queries share the "我是X"/"我在X"/"我叫X" prefixes; they must not
+	// produce (and thus overwrite) profile facts. Regression for user.name="谁".
+	queries := []string{
+		"我是谁",
+		"你还记得我是谁吗",
+		"我叫什么名字",
+		"我叫啥",
+		"我在哪",
+		"我在哪个城市",
+	}
+	for _, q := range queries {
+		t.Run(q, func(t *testing.T) {
+			got := x.Extract("s", []Message{{Role: models.RoleHuman, Content: q, ID: "m1"}})
+			if len(got) != 0 {
+				t.Fatalf("want 0 entries for question %q, got %+v", q, got)
+			}
+		})
+	}
+}
+
 func TestExtractor_NoMatch(t *testing.T) {
 	x := NewDeterministicExtractor()
 	got := x.Extract("s", []Message{{Role: models.RoleHuman, Content: "今天天气怎么样"}})

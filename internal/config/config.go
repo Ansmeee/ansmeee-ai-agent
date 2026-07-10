@@ -121,6 +121,7 @@ type LongTermConfig struct {
 	BudgetRatio     float64         `mapstructure:"budget_ratio"`
 	Admission       AdmissionConfig `mapstructure:"admission"`
 	ExtractionModel string          `mapstructure:"extraction_model"`
+	LLMExtract      bool            `mapstructure:"llm_extract"` // enable LLM extractor (needs ExtractionModel)
 }
 
 // ChannelConfig configures a structured L2 channel (fact / policy).
@@ -132,10 +133,12 @@ type ChannelConfig struct {
 
 // VectorConfig configures the optional L2 vector channel.
 type VectorConfig struct {
-	Enabled       bool    `mapstructure:"enabled"`
-	EmbeddingDim  int     `mapstructure:"embedding_dim"`
-	TopK          int     `mapstructure:"top_k"`
-	MinSimilarity float64 `mapstructure:"min_similarity"`
+	Enabled        bool    `mapstructure:"enabled"`
+	Backend        string  `mapstructure:"backend"`         // memory | milvus
+	EmbeddingModel string  `mapstructure:"embedding_model"` // empty → provider default
+	EmbeddingDim   int     `mapstructure:"embedding_dim"`
+	TopK           int     `mapstructure:"top_k"`
+	MinSimilarity  float64 `mapstructure:"min_similarity"`
 }
 
 // ScoreWeights are the L2 recall scoring weights.
@@ -143,6 +146,7 @@ type ScoreWeights struct {
 	Confidence float64 `mapstructure:"confidence"`
 	Freshness  float64 `mapstructure:"freshness"`
 	Relevance  float64 `mapstructure:"relevance"`
+	Semantic   float64 `mapstructure:"semantic"` // weight for vector cosine score in hybrid re-rank
 }
 
 // AdmissionConfig is the L2 write admission control.
@@ -313,6 +317,9 @@ func applyMemoryDefaults(m *MemoryConfig) {
 	if lt.Scoring.Relevance == 0 {
 		lt.Scoring.Relevance = 0.5
 	}
+	if lt.Scoring.Semantic == 0 {
+		lt.Scoring.Semantic = 0.5
+	}
 	if lt.Admission.WriteThreshold == 0 {
 		lt.Admission.WriteThreshold = 0.6
 	}
@@ -321,6 +328,9 @@ func applyMemoryDefaults(m *MemoryConfig) {
 	}
 	if lt.Admission.MaxExtractionsPerSession == 0 {
 		lt.Admission.MaxExtractionsPerSession = 1
+	}
+	if lt.Vector.Backend == "" {
+		lt.Vector.Backend = "memory"
 	}
 	if lt.Vector.EmbeddingDim == 0 {
 		lt.Vector.EmbeddingDim = 1536

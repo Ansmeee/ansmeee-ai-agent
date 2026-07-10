@@ -8,7 +8,9 @@
       "Bash(go fmt *)",
       "Bash(find / -name \"engine.go\" -path \"*internal/agent*\")",
       "Read(//Users/zhengwenjun/**)",
-      "Bash(gofmt *)"
+      "Bash(gofmt *)",
+      "Bash(ls /app)",
+      "Read(//app/internal/**)"
     ]
   }
 }

@@ -99,15 +99,54 @@ func main() {
 		if ferr != nil {
 			logger.Warn("fact store init failed, long-term memory disabled", zap.Error(ferr))
 		} else {
-			// Phase 1: in-memory task backend (redis backend deferred to Phase 2).
+			// In-memory task backend (redis backend deferred).
 			taskStore := memory.NewTaskStore(&cfg.Memory, nil)
+			lt := cfg.Memory.LongTerm
+
+			// Extractor: deterministic always; layer the LLM extractor when enabled.
+			var extractor memory.Extractor = memory.NewDeterministicExtractor()
+			if lt.LLMExtract && lt.ExtractionModel != "" {
+				completer := memory.NewProviderCompleter(llmProvider, lt.ExtractionModel)
+				extractor = memory.NewCompositeExtractor(
+					memory.NewDeterministicExtractor(),
+					memory.NewLLMExtractor(completer, 0),
+				)
+				logger.Info("llm extractor enabled", zap.String("model", lt.ExtractionModel))
+			}
+
+			opts := []memory.ManagerOption{memory.WithSummaryStore(factStore)}
+
+			// Semantic vector channel (embedder + store), pluggable backend.
+			if lt.Vector.Enabled {
+				var embedder memory.Embedder
+				if em, eerr := memory.NewOpenAIEmbedder(&cfg.LLM, lt.Vector.EmbeddingModel); eerr == nil {
+					embedder = em
+				} else {
+					logger.Warn("openai embedder init failed, using hash embedder", zap.Error(eerr))
+					embedder = memory.NewHashEmbedder(lt.Vector.EmbeddingDim)
+				}
+				opts = append(opts,
+					memory.WithEmbedder(embedder),
+					memory.WithVectorStore(memory.NewVectorStore(lt.Vector)),
+				)
+				logger.Info("semantic vector channel enabled", zap.String("backend", lt.Vector.Backend))
+			}
+
+			// Idle-session summarizer reuses the extraction model.
+			if lt.ExtractionModel != "" {
+				completer := memory.NewProviderCompleter(llmProvider, lt.ExtractionModel)
+				if s := memory.NewSummarizer(completer); s != nil {
+					opts = append(opts, memory.WithSummarizer(s))
+				}
+			}
+
 			memMgr = memory.NewMemoryManager(
 				sessionStore, taskStore, factStore,
-				memory.NewQueryRouter(), memory.NewDeterministicExtractor(),
-				cfg.Memory.LongTerm,
+				memory.NewQueryRouter(), extractor,
+				lt, opts...,
 			)
 			go memory.NewIdleScanner(gormDB, memMgr, &cfg.Memory).Start(memoryCtx)
-			logger.Info("memory manager initialized (fact + task, Phase 1)")
+			logger.Info("memory manager initialized (fact + task + vector + summary)")
 		}
 	}
 

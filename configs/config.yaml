@@ -61,26 +61,30 @@ memory:
   # L2 long-term memory. Set enabled=false to fully disable and match mainline behavior.
   longterm:
     enabled: true
-    router: true          # deterministic query router gating fact recall
+    router: true          # deterministic query router gating fact/semantic recall
     budget_ratio: 0.2     # fraction of the base prompt spent on enrichment
-    extraction_model: ""  # override model for the Phase 2 LLM summarizer
+    extraction_model: ""  # model for the LLM extractor + idle summarizer (empty → base model)
+    llm_extract: false    # enable the LLM memory extractor (needs extraction_model); off → deterministic-only
     fact:
       enabled: true
       top_k: 5
       min_score: 0.5
-    policy:               # Phase 2
+    policy:
       enabled: true
       top_k: 5
       min_score: 0.5
-    vector:               # Phase 3 (Milvus)
+    vector:               # semantic channel; backend=memory works with no external deps
       enabled: false
-      embedding_dim: 1536
+      backend: memory     # memory | milvus (milvus falls back to memory until implemented)
+      embedding_model: "" # embeddings model; empty → text-embedding-3-small
+      embedding_dim: 1536 # used only by the hash-embedder fallback
       top_k: 5
       min_similarity: 0.7
     scoring:              # recall weight = confidence*0.3 + freshness*0.2 + relevance*0.5
       confidence: 0.3
       freshness: 0.2
       relevance: 0.5
+      semantic: 1.0       # weight for vector cosine score in the semantic re-rank
     admission:
       write_threshold: 0.6
       max_entries_per_user: 1000
@@ -103,7 +107,7 @@ agent:
 log:
   level: info         # debug | info | warn | error
   format: json     # console for dev; json in prod
-  output: file      # stdout | file
+  output: stdout      # stdout | file
   filename: logs/app.log
   max_size: 100       # MB before rotation
   max_backups: 7      # rotated files to retain

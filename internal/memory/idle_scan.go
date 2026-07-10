@@ -79,8 +79,8 @@ func (s *IdleScanner) scanOnce(ctx context.Context) {
 		if s.alreadySeen(sess.UUID) {
 			continue
 		}
-		// Phase 1: silent no-op. Phase 2 wires the LLM summarizer here and then
-		// persists sessions.summarized = 1 once the summary is admitted.
+		// OnIdle summarizes the session, persists the summary + episodic embedding,
+		// and marks sessions.summarized = 1 on success (no-op when unconfigured).
 		s.mem.OnIdle(ctx, sess.UserID, sess.UUID)
 	}
 }

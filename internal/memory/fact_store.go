@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ansmeee-ai-agent/internal/config"
+	"ansmeee-ai-agent/internal/models"
 	"ansmeee-ai-agent/pkg/logger"
 
 	"go.uber.org/zap"
@@ -378,6 +379,18 @@ func (s *gormFactStore) Evolve(ctx context.Context, userID int64, now time.Time)
 	}
 	stat.Deleted = int(res.RowsAffected)
 	return stat, nil
+}
+
+// SaveSummary persists an idle-session summary row.
+func (s *gormFactStore) SaveSummary(ctx context.Context, sum SessionSummary) error {
+	return s.db.WithContext(ctx).Create(&sum).Error
+}
+
+// MarkSessionSummarized flags the session so the idle scanner skips it next sweep.
+func (s *gormFactStore) MarkSessionSummarized(ctx context.Context, sessionID string) error {
+	return s.db.WithContext(ctx).Model(&models.Session{}).
+		Where("uuid = ?", sessionID).
+		Update("summarized", true).Error
 }
 
 func sortScoredDesc(s []ScoredEntry) {
