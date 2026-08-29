@@ -18,7 +18,27 @@ type Config struct {
 	Memory MemoryConfig `mapstructure:"memory"`
 	Milvus Milvus       `mapstructure:"milvus"`
 	Agent  AgentConfig  `mapstructure:"agent"`
+	KB     KBConfig     `mapstructure:"kb"`
 	Log    LogConfig    `mapstructure:"log"`
+}
+
+// KBConfig is the agent knowledge-base configuration.
+type KBConfig struct {
+	Enabled        bool    `mapstructure:"enabled"`
+	VectorBackend  string  `mapstructure:"vector_backend"`   // memory | milvus | redis
+	EmbeddingModel string  `mapstructure:"embedding_model"`  // empty → provider default
+	EmbeddingDim   int     `mapstructure:"embedding_dim"`
+	VectorWeight   float64 `mapstructure:"vector_weight"`    // RRF 向量通道权重
+	KeywordWeight  float64 `mapstructure:"keyword_weight"`   // RRF 关键词通道权重
+	TopK           int     `mapstructure:"top_k"`
+	MinSimilarity  float64 `mapstructure:"min_similarity"`
+	MaxCharsPerTurn int    `mapstructure:"max_chars_per_turn"`
+	ChunkSize      int     `mapstructure:"chunk_size"`
+	ChunkOverlap   int     `mapstructure:"chunk_overlap"`
+	// Milvus 后端专用（可选）。为空则复用全局 Milvus 节配置。
+	Milvus Milvus `mapstructure:"milvus"`
+	// Redis 后端专用（可选）。为空则复用全局 Redis 节配置。
+	Redis RedisConfig `mapstructure:"redis"`
 }
 
 // LogConfig is the logger configuration.
@@ -198,6 +218,9 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("memory.longterm.policy.enabled", true)
 	v.SetDefault("memory.evolution.enabled", true)
 
+	// Knowledge base defaults to enabled.
+	v.SetDefault("kb.enabled", true)
+
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
@@ -262,6 +285,8 @@ func (c *Config) applyDefaults() {
 	if c.Agent.MaxContextMessages == 0 {
 		c.Agent.MaxContextMessages = 50
 	}
+
+	applyKBDefaults(&c.KB)
 
 	if c.Log.Level == "" {
 		c.Log.Level = "info"
@@ -375,5 +400,33 @@ func applyMySQLDefaults(c *MySQLNodeConfig) {
 	}
 	if c.ConnMaxLifetime == 0 {
 		c.ConnMaxLifetime = 5 * time.Minute
+	}
+}
+
+func applyKBDefaults(k *KBConfig) {
+	if k.VectorBackend == "" {
+		k.VectorBackend = "memory"
+	}
+	if k.EmbeddingDim == 0 {
+		k.EmbeddingDim = 1536
+	}
+	if k.VectorWeight == 0 && k.KeywordWeight == 0 {
+		k.VectorWeight = 0.5
+		k.KeywordWeight = 0.5
+	}
+	if k.TopK == 0 {
+		k.TopK = 5
+	}
+	if k.MinSimilarity == 0 {
+		k.MinSimilarity = 0.6
+	}
+	if k.MaxCharsPerTurn == 0 {
+		k.MaxCharsPerTurn = 4000
+	}
+	if k.ChunkSize == 0 {
+		k.ChunkSize = 512
+	}
+	if k.ChunkOverlap == 0 {
+		k.ChunkOverlap = k.ChunkSize / 4
 	}
 }

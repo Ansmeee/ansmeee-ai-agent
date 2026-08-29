@@ -4,6 +4,7 @@ import (
 	"ansmeee-ai-agent/internal/agent"
 	"ansmeee-ai-agent/internal/config"
 	"ansmeee-ai-agent/internal/handler"
+	"ansmeee-ai-agent/internal/kb"
 	"ansmeee-ai-agent/internal/llm"
 	"ansmeee-ai-agent/internal/memory"
 	"ansmeee-ai-agent/internal/middleware"
@@ -11,10 +12,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+	"strings"
 )
 
 // Setup configures all routes and middleware on the Gin engine.
-func Setup(cfg *config.Config, logger *zap.Logger, mem memory.SessionStore, engine *agent.Engine, registry *tool.Registry, agentStore *agent.AgentStore, modelConfigStore *llm.ModelConfigStore, db *gorm.DB) *gin.Engine {
+func Setup(cfg *config.Config, logger *zap.Logger, mem memory.SessionStore, engine *agent.Engine, registry *tool.Registry, agentStore *agent.AgentStore, modelConfigStore *llm.ModelConfigStore, kbMgr *kb.KBManager, db *gorm.DB) *gin.Engine {
 	gin.SetMode(cfg.Server.Mode)
 
 	r := gin.New()
@@ -32,14 +34,20 @@ func Setup(cfg *config.Config, logger *zap.Logger, mem memory.SessionStore, engi
 	agentHandler := handler.NewAgentHandler(agentStore)
 	modelConfigHandler := handler.NewModelConfigHandler(modelConfigStore)
 	authHandler := handler.NewAuthHandler(db, cfg.Server.JWTSecret)
+	var kbHandler *handler.KBHandler
+	if kbMgr != nil {
+		kbHandler = handler.NewKBHandler(kbMgr, agentStore)
+	}
 
-	// Serve frontend.
-	r.StaticFile("/", "./web/agents.html")
-	r.StaticFile("/chat", "./web/index.html")
-	r.StaticFile("/agents", "./web/agents.html")
-	r.StaticFile("/agent", "./web/agent.html")
-	r.StaticFile("/user", "./web/user.html")
-	r.StaticFile("/login", "./web/login.html")
+	// Serve frontend SPA (Vue 3).
+	r.Static("/web", "./web")
+	r.NoRoute(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.JSON(404, gin.H{"code": 404, "message": "not found"})
+			return
+		}
+		c.File("./web/index.html")
+	})
 
 	// Auth routes (public).
 	r.POST("/api/v1/auth/register", authHandler.Register)
@@ -66,6 +74,18 @@ func Setup(cfg *config.Config, logger *zap.Logger, mem memory.SessionStore, engi
 		v1.POST("/agents", agentHandler.Create)
 		v1.PUT("/agents/:id", agentHandler.Update)
 		v1.DELETE("/agents/:id", agentHandler.Delete)
+
+		// Agent knowledge base (per-agent isolation).
+		if kbHandler != nil {
+			v1.GET("/agents/:id/kb", kbHandler.GetKB)
+			v1.PUT("/agents/:id/kb", kbHandler.UpsertKB)
+			v1.GET("/agents/:id/kb/docs", kbHandler.ListDocs)
+			v1.POST("/agents/:id/kb/docs", kbHandler.AddDoc)
+			v1.GET("/agents/:id/kb/docs/:docId", kbHandler.GetDoc)
+			v1.DELETE("/agents/:id/kb/docs/:docId", kbHandler.DeleteDoc)
+			v1.POST("/agents/:id/kb/docs/:docId/reindex", kbHandler.ReindexDoc)
+			v1.POST("/agents/:id/kb/query", kbHandler.Query)
+		}
 	}
 
 	return r

@@ -13,6 +13,7 @@ import (
 
 	"ansmeee-ai-agent/internal/agent"
 	"ansmeee-ai-agent/internal/config"
+	"ansmeee-ai-agent/internal/kb"
 	"ansmeee-ai-agent/internal/llm"
 	"ansmeee-ai-agent/internal/memory"
 	"ansmeee-ai-agent/internal/router"
@@ -150,24 +151,44 @@ func main() {
 		}
 	}
 
+	// Initialize model config store.
+	modelConfigStore := llm.NewModelConfigStore(gormDB)
+	logger.Info("model config store initialized")
+
+	// Initialize knowledge-base manager (per-agent RAG, link A inject + link B query).
+	var kbMgr *kb.KBManager
+	if cfg.KB.Enabled {
+		kbEmbedder := buildKBEmbedder(cfg)
+		kbStore := kb.NewKBStore(gormDB)
+		docStore := kb.NewDocStore(gormDB)
+		chunkStore := kb.NewChunkStore(gormDB)
+		// 根据 kb.vector_backend 选择向量后端：memory | milvus | redis
+		// 后端不可达时自动降级到 memory，不阻塞服务启动。
+		vecStore := kb.NewVectorStoreByConfig(cfg.KB)
+		retriever := kb.NewHybridRetriever(vecStore, chunkStore, cfg.KB.VectorWeight, cfg.KB.KeywordWeight)
+		indexer := kb.NewIndexer(kbStore, docStore, chunkStore, vecStore, kb.NewDocParser(), kb.NewRecursiveChunker(), kbEmbedder)
+		kbMgr = kb.NewKBManager(kbStore, docStore, chunkStore, retriever, indexer, kbEmbedder, kb.WithVectorStore(vecStore))
+		logger.Info("knowledge base manager initialized", zap.String("vector_backend", cfg.KB.VectorBackend))
+	}
+
 	// Initialize agent engine.
 	cb := agent.NewCallback(appLogger)
-	engine := agent.New(llmProvider, reg, sessionStore, cb,
+	engineOpts := []agent.EngineOption{
 		agent.WithMaxIter(cfg.Agent.MaxIterations),
 		agent.WithToolTimeout(cfg.Agent.ToolTimeout),
 		agent.WithMaxOutputLength(cfg.Agent.MaxOutputLength),
 		agent.WithParallelToolCalls(cfg.Agent.ParallelToolCalls),
 		agent.WithMaxContextMessages(cfg.Agent.MaxContextMessages),
 		agent.WithMemoryManager(memMgr),
-	)
+	}
+	if kbMgr != nil {
+		engineOpts = append(engineOpts, agent.WithKBInjector(kbMgr))
+	}
+	engine := agent.New(llmProvider, reg, sessionStore, cb, engineOpts...)
 	logger.Info("agent engine initialized")
 
-	// Initialize model config store.
-	modelConfigStore := llm.NewModelConfigStore(gormDB)
-	logger.Info("model config store initialized")
-
 	// Setup router and start server.
-	r := router.Setup(cfg, appLogger, sessionStore, engine, reg, agentStore, modelConfigStore, gormDB)
+	r := router.Setup(cfg, appLogger, sessionStore, engine, reg, agentStore, modelConfigStore, kbMgr, gormDB)
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	srv := &http.Server{
@@ -220,6 +241,17 @@ func openGORM(_ context.Context, cfg *config.Config) (*gorm.DB, error) {
 		}
 	}
 	return db, nil
+}
+
+// buildKBEmbedder builds the knowledge-base embedder, reusing the memory package's
+// OpenAI / hash embedder implementations. Falls back to a deterministic hash
+// embedder when the OpenAI client cannot be initialized.
+func buildKBEmbedder(cfg *config.Config) kb.Embedder {
+	if em, err := memory.NewOpenAIEmbedder(&cfg.LLM, cfg.KB.EmbeddingModel); err == nil {
+		return em
+	}
+	logger.Warn("kb openai embedder init failed, using hash embedder")
+	return memory.NewHashEmbedder(cfg.KB.EmbeddingDim)
 }
 
 func initSessionStore(_ context.Context, cfg *config.Config, gormDB *gorm.DB) (memory.SessionStore, error) {

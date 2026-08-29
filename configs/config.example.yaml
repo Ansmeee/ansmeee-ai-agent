@@ -53,3 +53,16 @@ agent:
   max_output_length: 4096      # Max tool output chars (truncated if exceeded)
   parallel_tool_calls: true    # Allow parallel tool execution
   max_context_messages: 50     # Max history messages in context window
+
+kb:                            # Agent knowledge base (per-agent RAG)
+  enabled: true                # Master switch; false disables link A inject + link B query
+  vector_backend: memory       # memory | milvus (Phase1: memory only)
+  embedding_model: ""          # Empty → provider default (e.g. text-embedding-3-small)
+  embedding_dim: 1536
+  vector_weight: 0.5           # RRF vector channel weight
+  keyword_weight: 0.5          # RRF keyword channel weight
+  top_k: 5
+  min_similarity: 0.6
+  max_chars_per_turn: 4000     # Link A injection budget (chars)
+  chunk_size: 512              # Chunk size in runes
+  chunk_overlap: 128           # Overlap between adjacent chunks

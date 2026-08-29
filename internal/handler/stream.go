@@ -69,6 +69,7 @@ func (h *StreamHandler) resolveAgentConfig(ctx context.Context, agentID string, 
 		return nil, fmt.Errorf("agent %q is disabled", agentID)
 	}
 	cfg := &agent.AgentConfig{
+		AgentID:       a.UUID,
 		Prompt:        a.Prompt,
 		Tools:         []string(a.Tools),
 		Model:         a.Model,

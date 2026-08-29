@@ -26,6 +26,12 @@ const defaultSystemPrompt = "直接回答用户问题。当需要获取实时信
 
 const maxParallelTools = 5
 
+// KBInjector injects knowledge-base context into the system prompt (link A).
+// Implemented by *kb.KBManager; defined here to keep the engine decoupled.
+type KBInjector interface {
+	Inject(ctx context.Context, agentID, query string) string
+}
+
 // Engine orchestrates LLM calls with tools and memory.
 type Engine struct {
 	llm                *llm.Provider
@@ -39,6 +45,7 @@ type Engine struct {
 	parallelToolCalls  bool
 	maxContextMessages int
 	memMgr             *memory.MemoryManager
+	kbInjector         KBInjector
 }
 
 // EngineOption configures the engine.
@@ -74,6 +81,12 @@ func WithMemoryManager(mm *memory.MemoryManager) EngineOption {
 	return func(e *Engine) { e.memMgr = mm }
 }
 
+// WithKBInjector attaches the knowledge-base injector (link A). When nil, no KB
+// context is appended to the system prompt.
+func WithKBInjector(kb KBInjector) EngineOption {
+	return func(e *Engine) { e.kbInjector = kb }
+}
+
 // New creates a new Agent engine.
 func New(llmProvider *llm.Provider, reg *tool.Registry, mem memory.SessionStore, cb *Callback, opts ...EngineOption) *Engine {
 	e := &Engine{
@@ -96,6 +109,7 @@ func New(llmProvider *llm.Provider, reg *tool.Registry, mem memory.SessionStore,
 
 // AgentConfig holds per-request agent configuration resolved from the Agent model.
 type AgentConfig struct {
+	AgentID           string
 	Prompt            string
 	Tools             []string
 	Model             string
@@ -165,6 +179,12 @@ func (e *Engine) ProcessStream(ctx context.Context, sessionID, userMessage strin
 			prompt = appendEnrichment(prompt, enrich)
 			if task != nil {
 				memory.UpdateTaskState(task, memory.UserMessageEvent(userMessage))
+			}
+		}
+		// 链路 A：知识库隐式注入（带超时保护，失败降级为空，不阻塞主流程）。
+		if e.kbInjector != nil && agentCfg != nil && agentCfg.AgentID != "" {
+			if kbCtx := e.kbInjector.Inject(ctx, agentCfg.AgentID, userMessage); kbCtx != "" {
+				prompt = appendEnrichment(prompt, kbCtx)
 			}
 		}
 		messages := e.buildMessages(prompt, history)
